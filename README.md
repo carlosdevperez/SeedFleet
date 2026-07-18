@@ -13,10 +13,10 @@ manage.
 go run ./cmd/seedfleet
 ```
 
-The server listens on `127.0.0.1:8080` by default. A scan is synchronous and
-only one may run at a time. A complete all-port scan can take several minutes
-or longer depending on the requested CIDR size and how many probes are silently
-dropped:
+The server listens on `127.0.0.1:8080` by default. Network discovery is
+synchronous and only one discovery scan may run at a time. Discovery uses a
+small bounded probe set plus local-network identity signals; exhaustive port
+inspection is a separate device operation and never delays this request:
 
 ```sh
 curl -X POST http://127.0.0.1:8080/scans \
@@ -50,6 +50,7 @@ The API is intentionally small:
 | Method and path | Behavior |
 | --- | --- |
 | `POST /scans` | Validates the CIDR, performs discovery, stores the observations, and returns the observed device collection with `200 OK` |
+| `POST /devices/{id}/port-inspections` | Inspects TCP services on one inventoried device using an explicit profile |
 | `POST /deployments/docker` | Installs or verifies Docker Engine on one Linux host over SSH and returns the result with `200 OK` |
 | `GET /devices` | Returns the accumulated inventory |
 | `GET /health` | Returns `{"status":"ok"}` |
@@ -61,19 +62,50 @@ There are no background scan jobs or inventory query language at this stage.
 Every device representation includes an opaque `id` that remains stable when a
 known MAC address moves to another IP address.
 
-Canceling the HTTP request cancels outstanding discovery and port probes.
+Canceling an HTTP request cancels its outstanding discovery or port probes.
 
-Device responses expose open TCP ports in the existing `openPorts` array and
-open UDP ports in `openUdpPorts`:
+Device responses expose TCP ports found by the bounded discovery pass in
+`openPorts`. `openUdpPorts` remains in the representation for compatibility,
+but SeedFleet no longer labels ports from generic empty UDP datagrams:
 
 ```json
 {
   "id": "dev_0123456789abcdef0123456789abcdef",
   "ip": "192.168.1.20",
   "openPorts": [22, 443],
-  "openUdpPorts": [53, 5353]
+  "openUdpPorts": []
 }
 ```
+
+## Targeted TCP inspection
+
+Port inspection requires a durable device ID returned by `POST /scans` or
+`GET /devices`. It never expands a CIDR into an all-address, all-port matrix.
+The default `services` profile checks a small fleet-oriented set:
+
+```sh
+curl -X POST \
+  http://127.0.0.1:8080/devices/dev_0123456789abcdef0123456789abcdef/port-inspections \
+  -H 'Content-Type: application/json' \
+  -d '{"profile":"services"}'
+```
+
+Available profiles are:
+
+- `services`: 23 fleet-oriented TCP services;
+- `common`: ports 1-1024 plus relevant higher service ports; and
+- `full-tcp`: every TCP port, explicitly requested for one known device.
+
+Completed results are cached for five minutes. Use `{"profile":"common",
+"refresh":true}` to bypass a completed cache entry. Identical concurrent
+requests share the same network operation. Responses report the number of
+ports probed, peak worker concurrency, duration, reachability, timestamp, and
+whether the result came from cache.
+
+The TCP inspection pool starts at 128 workers and ramps as high as 1,024 while
+the timeout rate remains stable. It backs off when increasing timeouts or local
+socket-resource errors indicate pressure. A full TCP inspection can still be
+slow when a target silently filters connections; client cancellation stops it.
 
 ## Remote Docker deployment
 
@@ -128,11 +160,10 @@ API on its default loopback address while using this endpoint.
 
 ## Discovery
 
-SeedFleet combines a complete port sweep with complementary discovery signals:
+SeedFleet combines bounded reachability probes with complementary discovery
+signals:
 
-- a fast TCP reachability pass on ports 22, 80, 443, 445, and 3389;
-- TCP connect probes on ports 1 through 65,535 for every usable address;
-- UDP datagram probes on ports 1 through 65,535 for every usable address;
+- TCP reachability on ports 22, 80, 443, 445, and 3389;
 - the Linux IPv4 neighbor table when available;
 - local host identity;
 - reverse DNS;
@@ -141,23 +172,16 @@ SeedFleet combines a complete port sweep with complementary discovery signals:
 - optional MAC-address aliases.
 
 Successful TCP connections and explicit connection refusals both prove that a
-host is reachable. The fast pass runs while the complete sweep is in progress;
-on Linux, the scanner reads `/proc/net/arp` immediately after that pass, before
-early cache entries can expire during a long sweep. This also finds quiet
-devices that drop every configured TCP probe.
+host is reachable. The 512-worker bounded pass also populates the Linux neighbor
+cache, which SeedFleet reads immediately through `/proc/net/arp`. This finds
+many quiet local devices that drop every configured TCP connection. Identity
+sources run concurrently, reverse DNS uses up to 128 workers, and SSDP device
+descriptions share a connection pool with up to 64 workers.
 
-The fast pass and the complete TCP and UDP sweeps use separate bounded worker
-pools and run concurrently. Full-sweep workers atomically claim jobs from the
-address/port range instead of serializing behind a single producer, and only
-positive observations are retained. The complete target matrix is therefore
-covered without allocating it in memory.
-
-A successful TCP connection is reported as open. UDP has no generic handshake,
-so SeedFleet sends an empty datagram to each UDP port and reports a port as open
-only if the endpoint replies. A silent UDP probe is inherently ambiguous—it may
-be open with an application that ignores the empty payload, or a firewall may
-have filtered it—so silence is not mislabeled as an open port. The sweep does
-not perform application banner or version detection.
+UDP discovery is protocol-aware: mDNS/DNS-SD and SSDP construct valid protocol
+messages. SeedFleet does not send empty datagrams to every UDP port because
+silence cannot distinguish an open service from a firewall and most services
+ignore invalid payloads. New UDP discovery belongs in a focused protocol file.
 
 There is no universal unauthenticated protocol for device names. Aliases keep
 names stable for devices that advertise identity intermittently:
@@ -197,8 +221,9 @@ go run ./cmd/seedfleet \
   --allow-routed-networks
 ```
 
-An all-port sweep produces substantial network traffic. Scan only networks you
-own or are authorized to inspect, and start with a narrow CIDR when possible.
+Full TCP inspection produces substantial traffic even though it targets only
+one inventoried device. Inspect only devices you own or are authorized to
+inspect.
 
 ## Project layout
 
@@ -228,6 +253,7 @@ make build
 make test
 make race
 make verify
+make bench
 ```
 
 The default in-memory inventory is lost when the process stops. Use

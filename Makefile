@@ -6,7 +6,7 @@ SEEDFLEET := $(OUT_DIR)/seedfleet
 
 GO_BUILD_FLAGS ?= -trimpath
 
-.PHONY: all build clean fmt test race verify
+.PHONY: all build clean fmt test race bench verify
 
 all: build
 
@@ -25,6 +25,9 @@ test:
 
 race:
 	go test -race ./...
+
+bench:
+	go test -run '^$$' -bench . -benchmem ./pkg/fleet/internal/scanner
 
 verify:
 	test -z "$$(gofmt -s -l .)"

@@ -6,7 +6,8 @@ import (
 	"net"
 	"net/netip"
 	"reflect"
-	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -64,91 +65,62 @@ func TestScanIncludesQuietHostFromNeighborTable(t *testing.T) {
 	}
 }
 
-func TestScanReadsNeighborsBeforeFullPortSweepCompletes(t *testing.T) {
-	fullSweepStarted := make(chan struct{})
-	neighborRead := make(chan struct{}, 1)
-	releaseFullSweep := make(chan struct{})
-	var releaseOnce sync.Once
-	release := func() { releaseOnce.Do(func() { close(releaseFullSweep) }) }
-	defer release()
-
+func TestScanDoesNotRunExplicitPortInspection(t *testing.T) {
 	address := netip.MustParseAddr("192.0.2.1")
+	probes := 0
 	scanner := New(Config{
-		TCPPortRange:      PortRange{First: 1, Last: 1},
-		DiscoveryPorts:    []uint16{80},
-		Timeout:           time.Second,
-		PortTimeout:       time.Second,
-		Concurrency:       1,
-		ProbeConcurrency:  1,
-		MaxAddresses:      1,
-		InterfacePrefixes: testInterfacePrefixes,
-		NeighborSource: signalingNeighborSource{
-			called:    neighborRead,
-			neighbors: []Neighbor{{IP: address, MAC: mustParseMAC(t, "e0:ef:bf:ad:56:3c")}},
-		},
-		IdentitySources: []IdentitySource{},
-		DialContext: func(ctx context.Context, _, endpoint string) (net.Conn, error) {
-			if endpoint != "192.0.2.1:1" {
-				return nil, errors.New("probe timed out")
+		DiscoveryPorts:       []uint16{80},
+		Timeout:              time.Second,
+		Concurrency:          1,
+		DiscoveryConcurrency: 1,
+		MaxAddresses:         1,
+		InterfacePrefixes:    testInterfacePrefixes,
+		NeighborSource:       fakeNeighborSource{},
+		IdentitySources:      []IdentitySource{},
+		DialContext: func(_ context.Context, network, endpoint string) (net.Conn, error) {
+			probes++
+			if network != "tcp" || endpoint != "192.0.2.1:80" {
+				t.Fatalf("unexpected inspection probe %q %q", network, endpoint)
 			}
-			close(fullSweepStarted)
-			select {
-			case <-releaseFullSweep:
-				return nil, errors.New("probe timed out")
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			}
+			return nil, syscall.ECONNREFUSED
 		},
 	})
 
-	type scanResult struct {
-		result Result
-		err    error
+	result, err := scanner.Scan(context.Background(), "192.0.2.1/32")
+	if err != nil {
+		t.Fatal(err)
 	}
-	completed := make(chan scanResult, 1)
-	go func() {
-		result, err := scanner.Scan(context.Background(), "192.0.2.1/32")
-		completed <- scanResult{result: result, err: err}
-	}()
-
-	select {
-	case <-fullSweepStarted:
-	case <-time.After(time.Second):
-		t.Fatal("full port sweep did not start")
+	if probes != 1 {
+		t.Fatalf("probes = %d, want one discovery probe", probes)
 	}
-	select {
-	case <-neighborRead:
-	case <-time.After(time.Second):
-		t.Fatal("neighbor table was not read while full port sweep was active")
-	}
-	select {
-	case result := <-completed:
-		t.Fatalf("scan completed before the full sweep was released: %v", result.err)
-	default:
-	}
-
-	release()
-	select {
-	case result := <-completed:
-		if result.err != nil {
-			t.Fatal(result.err)
-		}
-		if len(result.result.Devices) != 1 || result.result.Devices[0].IP != address {
-			t.Fatalf("devices = %#v, want neighbor %s", result.result.Devices, address)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("scan did not complete after the full sweep was released")
+	if len(result.Devices) != 1 || result.Devices[0].IP != address {
+		t.Fatalf("devices = %#v, want reachable device %s", result.Devices, address)
 	}
 }
 
-type signalingNeighborSource struct {
-	called    chan<- struct{}
-	neighbors []Neighbor
-}
+func TestDefaultScanBoundsProbeCountFor24(t *testing.T) {
+	config := DefaultConfig()
+	config.ResolveNames = false
+	config.InterfacePrefixes = testInterfacePrefixes
+	config.NeighborSource = fakeNeighborSource{}
+	config.IdentitySources = []IdentitySource{}
+	var probes atomic.Int32
+	config.DialContext = func(context.Context, string, string) (net.Conn, error) {
+		probes.Add(1)
+		return nil, errors.New("filtered")
+	}
 
-func (source signalingNeighborSource) List(context.Context) ([]Neighbor, error) {
-	source.called <- struct{}{}
-	return source.neighbors, nil
+	result, err := New(config).Scan(context.Background(), "192.0.2.0/24")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Devices) != 0 {
+		t.Fatalf("devices = %#v, want none", result.Devices)
+	}
+	want := int32(254 * len(config.DiscoveryPorts))
+	if got := probes.Load(); got != want {
+		t.Fatalf("probes = %d, want bounded discovery count %d", got, want)
+	}
 }
 
 func TestScanIncludesHostFromNameDiscovery(t *testing.T) {

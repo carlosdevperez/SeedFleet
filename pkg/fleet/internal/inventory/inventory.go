@@ -160,6 +160,20 @@ func (i *Memory) List(ctx context.Context) ([]devices.Device, error) {
 	return result, nil
 }
 
+// Get returns one device by durable ID.
+func (i *Memory) Get(ctx context.Context, id devices.ID) (devices.Device, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return devices.Device{}, false, err
+	}
+	i.mu.RLock()
+	item, ok := i.devices[id]
+	i.mu.RUnlock()
+	if !ok {
+		return devices.Device{}, false, nil
+	}
+	return clone(item), true, nil
+}
+
 // Close releases inventory resources. Memory has no resources to release.
 func (i *Memory) Close() error {
 	return nil

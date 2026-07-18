@@ -41,7 +41,7 @@ func newSSDPIdentitySource(timeout time.Duration, concurrency int) IdentitySourc
 	if concurrency < 1 {
 		concurrency = 1
 	}
-	return ssdpIdentitySource{timeout: timeout, concurrency: min(concurrency, 16)}
+	return ssdpIdentitySource{timeout: timeout, concurrency: min(concurrency, 64)}
 }
 
 func (source ssdpIdentitySource) Discover(ctx context.Context, prefix netip.Prefix) ([]Identity, error) {
@@ -133,13 +133,15 @@ func (source ssdpIdentitySource) fetchDescriptions(ctx context.Context, prefix n
 	jobs := make(chan ssdpLocation)
 	results := make(chan Identity)
 	workerCount := min(source.concurrency, len(locations))
+	client, transport := source.descriptionClient(prefix)
+	defer transport.CloseIdleConnections()
 	var workers sync.WaitGroup
 	workers.Add(workerCount)
 	for range workerCount {
 		go func() {
 			defer workers.Done()
 			for location := range jobs {
-				if observation, ok := source.fetchDescription(ctx, prefix, location); ok {
+				if observation, ok := source.fetchDescriptionWithClient(ctx, client, location); ok {
 					select {
 					case results <- observation:
 					case <-ctx.Done():
@@ -182,11 +184,16 @@ func (source ssdpIdentitySource) fetchDescriptions(ctx context.Context, prefix n
 }
 
 func (source ssdpIdentitySource) fetchDescription(ctx context.Context, prefix netip.Prefix, location ssdpLocation) (Identity, bool) {
+	client, transport := source.descriptionClient(prefix)
+	defer transport.CloseIdleConnections()
+	return source.fetchDescriptionWithClient(ctx, client, location)
+}
+
+func (source ssdpIdentitySource) descriptionClient(prefix netip.Prefix) (*http.Client, *http.Transport) {
 	transport := &http.Transport{
 		Proxy:       nil,
 		DialContext: (&net.Dialer{Timeout: source.timeout}).DialContext,
 	}
-	defer transport.CloseIdleConnections()
 	client := &http.Client{
 		Transport: transport,
 		Timeout:   source.timeout,
@@ -198,6 +205,10 @@ func (source ssdpIdentitySource) fetchDescription(ctx context.Context, prefix ne
 			return nil
 		},
 	}
+	return client, transport
+}
+
+func (source ssdpIdentitySource) fetchDescriptionWithClient(ctx context.Context, client *http.Client, location ssdpLocation) (Identity, bool) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, location.url, nil)
 	if err != nil {
 		return Identity{}, false

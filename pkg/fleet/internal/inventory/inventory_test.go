@@ -13,8 +13,40 @@ import (
 
 type testInventory interface {
 	Save(context.Context, []devices.Device) ([]devices.Device, error)
+	Get(context.Context, devices.ID) (devices.Device, bool, error)
 	List(context.Context) ([]devices.Device, error)
 	Close() error
+}
+
+func TestInventoryGetsDeviceByDurableID(t *testing.T) {
+	testInventories(t, func(t *testing.T, inventory testInventory) {
+		created, err := inventory.Save(context.Background(), []devices.Device{{
+			IP:           netip.MustParseAddr("192.0.2.10"),
+			OpenPorts:    []uint16{22, 443},
+			OpenUDPPorts: []uint16{},
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		item, ok, err := inventory.Get(context.Background(), created[0].ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ok || item.ID != created[0].ID || item.IP != created[0].IP {
+			t.Fatalf("Get = %#v, %t", item, ok)
+		}
+		item.OpenPorts[0] = 9999
+		stored, ok, err := inventory.Get(context.Background(), created[0].ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ok || stored.OpenPorts[0] != 22 {
+			t.Fatalf("Get returned aliased data: %#v", stored)
+		}
+		if _, ok, err := inventory.Get(context.Background(), "dev_missing"); err != nil || ok {
+			t.Fatalf("missing Get = ok %t, error %v", ok, err)
+		}
+	})
 }
 
 func testInventories(t *testing.T, test func(*testing.T, testInventory)) {

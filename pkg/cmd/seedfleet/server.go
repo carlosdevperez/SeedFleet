@@ -54,9 +54,9 @@ func Run(ctx context.Context, args []string) error {
 		Handler:           newHandler(provider),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
-		// A complete TCP and UDP port sweep can legitimately take longer than a
-		// server-wide timeout. Client cancellation still stops the scan, and the
-		// Docker deployment handler applies its own bounded timeout.
+		// Explicit full-TCP inspection can legitimately outlive a server-wide
+		// timeout. Client cancellation still stops it, and the Docker deployment
+		// handler applies its own bounded timeout.
 		WriteTimeout: 0,
 		IdleTimeout:  60 * time.Second,
 	}

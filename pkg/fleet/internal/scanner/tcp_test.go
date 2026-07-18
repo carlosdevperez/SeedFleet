@@ -9,18 +9,18 @@ import (
 	"time"
 )
 
-func TestTCPPortsAreProbedConcurrently(t *testing.T) {
+func TestTCPDiscoveryUsesConfiguredConcurrency(t *testing.T) {
 	var active atomic.Int32
 	var maximum atomic.Int32
 	scanner := New(Config{
-		TCPPortRange:      PortRange{First: 80, Last: 81},
-		PortTimeout:       time.Second,
-		Concurrency:       2,
-		ProbeConcurrency:  4,
-		MaxAddresses:      4,
-		InterfacePrefixes: testInterfacePrefixes,
-		NeighborSource:    fakeNeighborSource{},
-		IdentitySources:   []IdentitySource{},
+		DiscoveryPorts:       []uint16{80, 81},
+		Timeout:              time.Second,
+		Concurrency:          2,
+		DiscoveryConcurrency: 4,
+		MaxAddresses:         4,
+		InterfacePrefixes:    testInterfacePrefixes,
+		NeighborSource:       fakeNeighborSource{},
+		IdentitySources:      []IdentitySource{},
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			current := active.Add(1)
 			defer active.Add(-1)

@@ -224,8 +224,12 @@ func findSQLiteDevice(ctx context.Context, tx *sql.Tx, found devices.Device) (de
 	return item, true, nil
 }
 
-func querySQLiteDevice(ctx context.Context, tx *sql.Tx, predicate string, argument any) (devices.Device, bool, error) {
-	row := tx.QueryRowContext(ctx, `SELECT `+deviceColumns+` FROM devices WHERE `+predicate, argument)
+type sqliteQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func querySQLiteDevice(ctx context.Context, queryer sqliteQueryer, predicate string, argument any) (devices.Device, bool, error) {
+	row := queryer.QueryRowContext(ctx, `SELECT `+deviceColumns+` FROM devices WHERE `+predicate, argument)
 	item, err := scanSQLiteDevice(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return devices.Device{}, false, nil
@@ -234,6 +238,15 @@ func querySQLiteDevice(ctx context.Context, tx *sql.Tx, predicate string, argume
 		return devices.Device{}, false, fmt.Errorf("query SQLite inventory: %w", err)
 	}
 	return item, true, nil
+}
+
+// Get returns one device by durable ID.
+func (s *SQLite) Get(ctx context.Context, id devices.ID) (devices.Device, bool, error) {
+	item, ok, err := querySQLiteDevice(ctx, s.db, "id = ?", id)
+	if err != nil {
+		return devices.Device{}, false, fmt.Errorf("get SQLite inventory device: %w", err)
+	}
+	return item, ok, nil
 }
 
 // List returns all devices sorted by IP address.

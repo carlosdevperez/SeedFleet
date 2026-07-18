@@ -8,17 +8,20 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/carlosdevperez/seedfleet/pkg/fleet"
 	"github.com/carlosdevperez/seedfleet/pkg/fleet/devices"
 )
 
 type fakeProvider struct {
-	network string
-	target  fleet.DockerInstallTarget
-	items   []devices.Device
-	install fleet.DockerInstallResult
-	err     error
+	network           string
+	target            fleet.DockerInstallTarget
+	inspectionRequest fleet.PortInspectionRequest
+	items             []devices.Device
+	inspection        fleet.PortInspectionResult
+	install           fleet.DockerInstallResult
+	err               error
 }
 
 func (p *fakeProvider) Scan(_ context.Context, network string) (fleet.ScanResult, error) {
@@ -28,6 +31,11 @@ func (p *fakeProvider) Scan(_ context.Context, network string) (fleet.ScanResult
 
 func (p *fakeProvider) List(context.Context) ([]devices.Device, error) {
 	return p.items, p.err
+}
+
+func (p *fakeProvider) InspectPorts(_ context.Context, request fleet.PortInspectionRequest) (fleet.PortInspectionResult, error) {
+	p.inspectionRequest = request
+	return p.inspection, p.err
 }
 
 func (p *fakeProvider) InstallDocker(_ context.Context, target fleet.DockerInstallTarget) (fleet.DockerInstallResult, error) {
@@ -73,6 +81,69 @@ func TestListDevicesEndpoint(t *testing.T) {
 
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"id":"dev_test"`) || !strings.Contains(response.Body.String(), `"name":"printer"`) || !strings.Contains(response.Body.String(), `"openUdpPorts":[5353]`) {
 		t.Fatalf("status = %d; body: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestPortInspectionEndpoint(t *testing.T) {
+	inspectedAt := time.Date(2026, time.July, 18, 14, 0, 0, 0, time.UTC)
+	provider := &fakeProvider{inspection: fleet.PortInspectionResult{
+		DeviceID:        "dev_test",
+		IP:              netip.MustParseAddr("192.0.2.5"),
+		Profile:         fleet.PortInspectionCommon,
+		OpenPorts:       []uint16{22, 443},
+		Reachable:       true,
+		PortsProbed:     1039,
+		PeakConcurrency: 512,
+		InspectedAt:     inspectedAt,
+		Duration:        1250 * time.Millisecond,
+	}}
+	handler := newHandler(provider)
+	request := httptest.NewRequest(http.MethodPost, "/devices/dev_test/port-inspections", strings.NewReader(`{"profile":"common","refresh":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d; body: %s", response.Code, response.Body.String())
+	}
+	if provider.inspectionRequest.DeviceID != "dev_test" || provider.inspectionRequest.Profile != fleet.PortInspectionCommon || !provider.inspectionRequest.Refresh {
+		t.Fatalf("inspection request = %#v", provider.inspectionRequest)
+	}
+	body := response.Body.String()
+	for _, expected := range []string{`"openPorts":[22,443]`, `"portsProbed":1039`, `"peakConcurrency":512`, `"durationMillis":1250`, `"cached":false`} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("body %s does not contain %s", body, expected)
+		}
+	}
+}
+
+func TestPortInspectionEndpointErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		body       string
+		mediaType  string
+		wantStatus int
+	}{
+		{name: "invalid profile", err: &fleet.InvalidPortInspectionError{Reason: "invalid profile"}, body: `{"profile":"bad"}`, mediaType: "application/json", wantStatus: http.StatusBadRequest},
+		{name: "missing device", err: fleet.ErrDeviceNotFound, body: `{}`, mediaType: "application/json", wantStatus: http.StatusNotFound},
+		{name: "timeout", err: context.DeadlineExceeded, body: `{}`, mediaType: "application/json", wantStatus: http.StatusGatewayTimeout},
+		{name: "internal", err: errors.New("private failure"), body: `{}`, mediaType: "application/json", wantStatus: http.StatusInternalServerError},
+		{name: "unknown field", body: `{"ports":[22]}`, mediaType: "application/json", wantStatus: http.StatusBadRequest},
+		{name: "wrong media type", body: `{}`, mediaType: "text/plain", wantStatus: http.StatusUnsupportedMediaType},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			handler := newHandler(&fakeProvider{err: test.err})
+			request := httptest.NewRequest(http.MethodPost, "/devices/dev_test/port-inspections", strings.NewReader(test.body))
+			request.Header.Set("Content-Type", test.mediaType)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d; body: %s", response.Code, test.wantStatus, response.Body.String())
+			}
+		})
 	}
 }
 

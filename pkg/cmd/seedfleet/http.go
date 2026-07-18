@@ -22,6 +22,7 @@ const dockerDeploymentTimeout = 10 * time.Minute
 type provider interface {
 	Scan(context.Context, string) (fleet.ScanResult, error)
 	List(context.Context) ([]devices.Device, error)
+	InspectPorts(context.Context, fleet.PortInspectionRequest) (fleet.PortInspectionResult, error)
 	InstallDocker(context.Context, fleet.DockerInstallTarget) (fleet.DockerInstallResult, error)
 }
 
@@ -35,8 +36,54 @@ func newHandler(provider provider) http.Handler {
 	mux.HandleFunc("GET /health", api.health)
 	mux.HandleFunc("GET /devices", api.listDevices)
 	mux.HandleFunc("POST /scans", api.scan)
+	mux.HandleFunc("POST /devices/{id}/port-inspections", api.inspectPorts)
 	mux.HandleFunc("POST /deployments/docker", api.installDocker)
 	return mux
+}
+
+func (a *api) inspectPorts(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if err := requireJSON(r); err != nil {
+		writeJSON(w, err.Status, errorResponse{Message: err.Message})
+		return
+	}
+	var request portInspectionRequest
+	if err := decodeJSON(w, r, &request); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Message: "body must be a JSON port-inspection request"})
+		return
+	}
+	result, err := a.provider.InspectPorts(r.Context(), fleet.PortInspectionRequest{
+		DeviceID: devices.ID(r.PathValue("id")),
+		Profile:  request.Profile,
+		Refresh:  request.Refresh,
+	})
+	if err != nil {
+		var invalid *fleet.InvalidPortInspectionError
+		switch {
+		case errors.As(err, &invalid):
+			writeJSON(w, http.StatusBadRequest, errorResponse{Message: invalid.Error()})
+		case errors.Is(err, fleet.ErrDeviceNotFound):
+			writeJSON(w, http.StatusNotFound, errorResponse{Message: err.Error()})
+		case errors.Is(err, context.DeadlineExceeded):
+			writeJSON(w, http.StatusGatewayTimeout, errorResponse{Message: "port inspection timed out"})
+		default:
+			log.Printf("port inspection for %q failed: %v", r.PathValue("id"), err)
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Message: "port inspection failed"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, portInspectionResponse{
+		DeviceID:        result.DeviceID,
+		IP:              result.IP,
+		Profile:         result.Profile,
+		OpenPorts:       append([]uint16{}, result.OpenPorts...),
+		Reachable:       result.Reachable,
+		PortsProbed:     result.PortsProbed,
+		PeakConcurrency: result.PeakConcurrency,
+		InspectedAt:     result.InspectedAt,
+		DurationMillis:  result.Duration.Milliseconds(),
+		Cached:          result.Cached,
+	})
 }
 
 func (a *api) installDocker(w http.ResponseWriter, r *http.Request) {
@@ -131,6 +178,24 @@ type dockerInstallRequest struct {
 	Host string `json:"host"`
 	User string `json:"user,omitempty"`
 	Port uint16 `json:"port,omitempty"`
+}
+
+type portInspectionRequest struct {
+	Profile fleet.PortInspectionProfile `json:"profile,omitempty"`
+	Refresh bool                        `json:"refresh,omitempty"`
+}
+
+type portInspectionResponse struct {
+	DeviceID        devices.ID                  `json:"deviceId"`
+	IP              netip.Addr                  `json:"ip"`
+	Profile         fleet.PortInspectionProfile `json:"profile"`
+	OpenPorts       []uint16                    `json:"openPorts"`
+	Reachable       bool                        `json:"reachable"`
+	PortsProbed     int                         `json:"portsProbed"`
+	PeakConcurrency int                         `json:"peakConcurrency"`
+	InspectedAt     time.Time                   `json:"inspectedAt"`
+	DurationMillis  int64                       `json:"durationMillis"`
+	Cached          bool                        `json:"cached"`
 }
 
 type dockerInstallResponse struct {

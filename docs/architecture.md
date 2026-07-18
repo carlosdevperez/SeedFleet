@@ -45,10 +45,12 @@ status codes and strict request decoding stay here.
 ### `pkg/fleet`
 
 `Provider` is the public API and the extension point for fleet management. It
-exposes four operations:
+exposes five operations:
 
-- `Scan`, which allows one active scan and stores successful observations;
+- `Scan`, which allows one active fast discovery scan and stores successful observations;
 - `List`, which returns the current inventory;
+- `InspectPorts`, which performs a cached, targeted TCP inspection on one
+  inventoried device;
 - `InstallDocker`, which allows one active deployment and synchronously
   bootstraps Docker Engine on a Linux host over SSH; and
 - `Close`, which releases the configured inventory.
@@ -61,15 +63,17 @@ persistence without exposing implementation types.
 This package defines public device data, its durable opaque ID, and the rules
 for combining same-scan observations and refreshing historical inventory
 identity. Stores reconcile a known MAC address before its IP so the ID survives
-DHCP address changes. `OpenPorts` retains the established TCP-port
-representation, while `OpenUDPPorts` records UDP ports that responded to a
-probe. Both collections represent the latest scan.
+DHCP address changes. `OpenPorts` contains TCP services observed during bounded
+discovery. Explicit inspection results are a separate representation so a
+later discovery scan cannot erase or masquerade as exhaustive inspection.
+`OpenUDPPorts` remains for representation compatibility; generic UDP sweeping
+is not performed.
 
 ### `pkg/fleet/internal`
 
 The scanner, memory and SQLite inventories, and Docker installer are private
 implementation packages. `Provider` owns a narrow inventory interface
-containing only `Save`, `List`, and `Close`, so tests and implementations can be
+containing only `Save`, `Get`, `List`, and `Close`, so tests and implementations can be
 swapped without exposing storage through the public API. The Go toolchain
 enforces this boundary, replacing the previous custom import-graph test.
 
@@ -79,12 +83,13 @@ maps the coordinator to each protocol file. The Docker installer is isolated
 from discovery and embeds the small POSIX shell program streamed through the
 user's local OpenSSH client.
 
-The scanner runs complete TCP and UDP port ranges concurrently for every usable
-address in the authorized CIDR while identity protocols gather complementary
-observations. A short TCP pass on common service ports primes the Linux neighbor
-cache, which is read as soon as that pass completes so a long full sweep cannot
-outlive early cache entries. `Provider` still owns scan serialization and
-commits only the completed observation batch to inventory.
+The scanner runs a bounded TCP reachability pass while identity protocols gather
+complementary observations, then reads the Linux neighbor cache and completes
+name resolution. Explicit TCP inspection is invoked separately for an address
+resolved from durable inventory identity. Its scheduler interleaves devices,
+ramps from 128 toward 1,024 workers while conditions remain stable, and backs
+off on congestion or local socket pressure. `Provider` owns scan serialization,
+inspection caching and request coalescing, and inventory orchestration.
 
 ## Deliberate simplifications
 
@@ -99,6 +104,9 @@ design:
   persistence, and the server exposes that choice as `--database`.
 - Optional discovery sources are best effort. Their failures do not expand the
   public API into a diagnostics framework.
+- Port inspection is synchronous and device-targeted. Completed results are
+  cached briefly; background jobs and progress state remain unnecessary until
+  a concrete client needs long-running full-TCP workflow support.
 - Docker deployment is synchronous and uses the official convenience installer
   as an explicit early-stage tradeoff. Durable jobs, per-distribution package
   plans, version pinning, and deployment history can follow concrete needs.

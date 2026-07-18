@@ -7,31 +7,78 @@ import (
 	"net/netip"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 )
 
-func TestDefaultConfigSweepsEveryTCPAndUDPPort(t *testing.T) {
+func TestDefaultConfigUsesFastDiscoveryAndAdaptiveInspectionPools(t *testing.T) {
 	config := DefaultConfig()
-	want := PortRange{First: 1, Last: 65535}
-	if config.TCPPortRange != want || config.UDPPortRange != want {
-		t.Fatalf("port ranges = TCP %#v, UDP %#v; want %#v", config.TCPPortRange, config.UDPPortRange, want)
-	}
-	if config.TCPPortRange.count() != 65535 || config.UDPPortRange.count() != 65535 {
-		t.Fatalf("port counts = TCP %d, UDP %d; want 65535 each", config.TCPPortRange.count(), config.UDPPortRange.count())
-	}
 	wantDiscovery := []uint16{22, 80, 443, 445, 3389}
 	if !reflect.DeepEqual(config.DiscoveryPorts, wantDiscovery) {
 		t.Fatalf("discovery ports = %v, want %v", config.DiscoveryPorts, wantDiscovery)
 	}
+	if config.DiscoveryConcurrency != 512 {
+		t.Fatalf("discovery concurrency = %d, want 512", config.DiscoveryConcurrency)
+	}
+	if config.PortMinConcurrency != 128 || config.PortMaxConcurrency != 1024 {
+		t.Fatalf("inspection concurrency = %d..%d, want 128..1024", config.PortMinConcurrency, config.PortMaxConcurrency)
+	}
 }
 
-func TestPortJobQueueIncludesAddressesAndRangeEndpoints(t *testing.T) {
-	address := netip.MustParseAddr("192.0.2.1")
-	secondAddress := netip.MustParseAddr("192.0.2.2")
-	jobs := newPortJobQueue([]netip.Addr{address, secondAddress}, PortRange{First: 65534, Last: 65535})
+func TestTCPInspectionProfilesAreBoundedAndExplicit(t *testing.T) {
+	tests := []struct {
+		profile TCPProfile
+		count   int
+	}{
+		{profile: TCPProfileServices, count: len(serviceTCPPorts)},
+		{profile: TCPProfileCommon, count: 1024 + countPortsAbove(serviceTCPPorts, 1024)},
+		{profile: TCPProfileFull, count: 65535},
+	}
+	for _, test := range tests {
+		t.Run(string(test.profile), func(t *testing.T) {
+			ports, err := tcpPortsForProfile(test.profile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(ports) != test.count || ports[0] == 0 {
+				t.Fatalf("ports = %d entries starting at %d, want %d nonzero entries", len(ports), ports[0], test.count)
+			}
+			if !sortIsStrict(ports) {
+				t.Fatalf("ports are not sorted and unique: %v", ports)
+			}
+		})
+	}
+	if _, err := tcpPortsForProfile("unknown"); err == nil {
+		t.Fatal("unknown profile was accepted")
+	}
+}
+
+func countPortsAbove(ports []uint16, boundary uint16) int {
+	count := 0
+	for _, port := range ports {
+		if port > boundary {
+			count++
+		}
+	}
+	return count
+}
+
+func sortIsStrict(ports []uint16) bool {
+	for index := 1; index < len(ports); index++ {
+		if ports[index] <= ports[index-1] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestPortJobQueueInterleavesAddresses(t *testing.T) {
+	first := netip.MustParseAddr("192.0.2.1")
+	second := netip.MustParseAddr("192.0.2.2")
+	jobs := newPortJobQueue([]netip.Addr{first, second}, []uint16{80, 443})
 
 	var found []probeJob
 	for {
@@ -42,72 +89,29 @@ func TestPortJobQueueIncludesAddressesAndRangeEndpoints(t *testing.T) {
 		found = append(found, job)
 	}
 	want := []probeJob{
-		{address: address, port: 65534},
-		{address: address, port: 65535},
-		{address: secondAddress, port: 65534},
-		{address: secondAddress, port: 65535},
+		{address: first, port: 80},
+		{address: second, port: 80},
+		{address: first, port: 443},
+		{address: second, port: 443},
 	}
 	if !reflect.DeepEqual(found, want) {
 		t.Fatalf("jobs = %#v, want %#v", found, want)
 	}
 }
 
-func TestTCPAndUDPPortSweepsRunConcurrently(t *testing.T) {
-	entered := make(chan string, 2)
-	release := make(chan struct{})
+func TestInspectTCPUsesSelectedProfile(t *testing.T) {
+	address := netip.MustParseAddr("192.0.2.10")
+	var probes atomic.Int32
 	scanner := New(Config{
-		TCPPortRange:     PortRange{First: 1, Last: 1},
-		UDPPortRange:     PortRange{First: 1, Last: 1},
-		PortTimeout:      time.Second,
-		ProbeConcurrency: 1,
-		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			entered <- network
-			select {
-			case <-release:
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			}
-			if network == "udp4" {
-				return &probeConn{readResponse: true}, nil
-			}
-			return &probeConn{}, nil
-		},
-	})
-
-	result := scanner.startPortScan(context.Background(), []netip.Addr{netip.MustParseAddr("192.0.2.1")})
-	seen := map[string]bool{}
-	for range 2 {
-		select {
-		case network := <-entered:
-			seen[network] = true
-		case <-time.After(time.Second):
-			t.Fatal("TCP and UDP sweeps did not start concurrently")
-		}
-	}
-	close(release)
-	scan := <-result
-	if scan.err != nil {
-		t.Fatal(scan.err)
-	}
-	if !seen["tcp"] || !seen["udp4"] {
-		t.Fatalf("dialed networks = %v, want tcp and udp4", seen)
-	}
-}
-
-func TestScanFindsDevicesThroughAllPortTCPAndUDPProbes(t *testing.T) {
-	scanner := New(Config{
-		TCPPortRange:      PortRange{First: 2, Last: 3},
-		UDPPortRange:      PortRange{First: 4, Last: 5},
-		Timeout:           time.Millisecond,
-		PortTimeout:       time.Second,
-		Concurrency:       2,
-		ProbeConcurrency:  4,
-		MaxAddresses:      4,
-		InterfacePrefixes: testInterfacePrefixes,
-		NeighborSource:    fakeNeighborSource{},
-		IdentitySources:   []IdentitySource{},
+		PortTimeout:        time.Second,
+		PortMinConcurrency: 4,
+		PortMaxConcurrency: 16,
 		DialContext: func(_ context.Context, network, endpoint string) (net.Conn, error) {
-			host, rawPort, err := net.SplitHostPort(endpoint)
+			if network != "tcp" {
+				t.Fatalf("network = %q, want tcp", network)
+			}
+			probes.Add(1)
+			_, rawPort, err := net.SplitHostPort(endpoint)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -115,135 +119,207 @@ func TestScanFindsDevicesThroughAllPortTCPAndUDPProbes(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			switch {
-			case network == "tcp" && host == "192.0.2.1" && port == 3:
+			if port == 443 || port == 8443 {
 				return &probeConn{}, nil
-			case network == "udp4" && host == "192.0.2.2" && port == 5:
-				return &probeConn{readResponse: true}, nil
-			case network == "udp4":
-				return &probeConn{readErr: timeoutError{}}, nil
-			default:
-				return nil, errors.New("probe timed out")
 			}
+			return nil, syscall.ECONNREFUSED
 		},
 	})
 
-	result, err := scanner.Scan(context.Background(), "192.0.2.0/30")
+	result, err := scanner.InspectTCP(context.Background(), address, TCPProfileServices)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Devices) != 2 {
-		t.Fatalf("devices = %#v, want two", result.Devices)
+	if !reflect.DeepEqual(result.OpenPorts, []uint16{443, 8443}) {
+		t.Fatalf("open ports = %v, want [443 8443]", result.OpenPorts)
 	}
-	tcpDevice := result.Devices[0]
-	if tcpDevice.IP.String() != "192.0.2.1" || !reflect.DeepEqual(tcpDevice.OpenPorts, []uint16{3}) || len(tcpDevice.OpenUDPPorts) != 0 {
-		t.Fatalf("TCP device = %#v, want 192.0.2.1 with TCP port 3", tcpDevice)
-	}
-	if !reflect.DeepEqual(tcpDevice.DiscoveredBy, []string{"tcp"}) {
-		t.Fatalf("TCP discovered by = %v, want [tcp]", tcpDevice.DiscoveredBy)
-	}
-	udpDevice := result.Devices[1]
-	if udpDevice.IP.String() != "192.0.2.2" || len(udpDevice.OpenPorts) != 0 || !reflect.DeepEqual(udpDevice.OpenUDPPorts, []uint16{5}) {
-		t.Fatalf("UDP device = %#v, want 192.0.2.2 with UDP port 5", udpDevice)
-	}
-	if !reflect.DeepEqual(udpDevice.DiscoveredBy, []string{"udp"}) {
-		t.Fatalf("UDP discovered by = %v, want [udp]", udpDevice.DiscoveredBy)
+	if !result.Reachable || result.PortsProbed != len(serviceTCPPorts) || int(probes.Load()) != len(serviceTCPPorts) {
+		t.Fatalf("inspection = %#v; probes = %d", result, probes.Load())
 	}
 }
 
-func TestUDPPortsAreProbedWithBoundedConcurrency(t *testing.T) {
+func TestTCPInspectionConcurrencyRampsToConfiguredMaximum(t *testing.T) {
 	var active atomic.Int32
 	var maximum atomic.Int32
 	scanner := New(Config{
-		UDPPortRange:     PortRange{First: 1, Last: 6},
-		PortTimeout:      time.Second,
-		ProbeConcurrency: 3,
-		DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
-			return &probeConn{
-				readResponse: true,
-				beforeRead: func() {
-					current := active.Add(1)
-					for {
-						previous := maximum.Load()
-						if current <= previous || maximum.CompareAndSwap(previous, current) {
-							break
-						}
-					}
-				},
-				afterRead: func() { active.Add(-1) },
-				readDelay: 20 * time.Millisecond,
-			}, nil
+		PortTimeout:        time.Second,
+		PortMinConcurrency: 2,
+		PortMaxConcurrency: 16,
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			current := active.Add(1)
+			defer active.Add(-1)
+			for {
+				previous := maximum.Load()
+				if current <= previous || maximum.CompareAndSwap(previous, current) {
+					break
+				}
+			}
+			select {
+			case <-time.After(time.Millisecond):
+				return nil, syscall.ECONNREFUSED
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
 		},
 	})
 
-	ports, err := scanner.scanUDPPorts(context.Background(), []netip.Addr{netip.MustParseAddr("192.0.2.1")})
+	result, err := scanner.InspectTCP(context.Background(), netip.MustParseAddr("192.0.2.10"), TCPProfileCommon)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := maximum.Load(); got != 3 {
-		t.Fatalf("maximum concurrent probes = %d, want 3", got)
-	}
-	if len(ports.open[netip.MustParseAddr("192.0.2.1")]) != 6 {
-		t.Fatalf("open UDP ports = %v, want six", ports)
+	if result.PeakConcurrency != 16 || maximum.Load() != 16 {
+		t.Fatalf("peak concurrency = result %d, observed %d; want 16", result.PeakConcurrency, maximum.Load())
 	}
 }
 
-func TestUDPProbeReportsOnlyRepliesAsOpen(t *testing.T) {
-	tests := []struct {
-		name          string
-		readErr       error
-		readResponse  bool
-		wantOpen      bool
-		wantReachable bool
-	}{
-		{name: "reply", readResponse: true, wantOpen: true, wantReachable: true},
-		{name: "closed", readErr: syscall.ECONNREFUSED, wantReachable: true},
-		{name: "silent", readErr: timeoutError{}},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			scanner := New(Config{
-				PortTimeout: time.Second,
-				DialContext: func(context.Context, string, string) (net.Conn, error) {
-					return &probeConn{readResponse: test.readResponse, readErr: test.readErr}, nil
-				},
-			})
-			open, reachable := scanner.probeUDPPort(context.Background(), netip.MustParseAddr("192.0.2.1"), 53)
-			if open != test.wantOpen || reachable != test.wantReachable {
-				t.Fatalf("probe = open %t, reachable %t; want %t, %t", open, reachable, test.wantOpen, test.wantReachable)
+func TestFullTCPInspectionCoversEveryUsablePort(t *testing.T) {
+	var probes atomic.Int32
+	var first atomic.Bool
+	var last atomic.Bool
+	scanner := New(Config{
+		PortTimeout:        time.Second,
+		PortMinConcurrency: 128,
+		PortMaxConcurrency: 1024,
+		DialContext: func(_ context.Context, _, endpoint string) (net.Conn, error) {
+			probes.Add(1)
+			if strings.HasSuffix(endpoint, ":1") {
+				first.Store(true)
 			}
-		})
+			if strings.HasSuffix(endpoint, ":65535") {
+				last.Store(true)
+			}
+			return nil, syscall.ECONNREFUSED
+		},
+	})
+
+	result, err := scanner.InspectTCP(context.Background(), netip.MustParseAddr("192.0.2.10"), TCPProfileFull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.PortsProbed != 65535 || probes.Load() != 65535 || !first.Load() || !last.Load() {
+		t.Fatalf("inspection = %#v; probes = %d; endpoints = %t/%t", result, probes.Load(), first.Load(), last.Load())
+	}
+	if result.PeakConcurrency != 1024 {
+		t.Fatalf("peak concurrency = %d, want 1024", result.PeakConcurrency)
 	}
 }
 
-type probeConn struct {
-	readResponse bool
-	readErr      error
-	readDelay    time.Duration
-	beforeRead   func()
-	afterRead    func()
+func TestTCPInspectionHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	scanner := New(Config{
+		PortTimeout:        time.Second,
+		PortMinConcurrency: 4,
+		PortMaxConcurrency: 16,
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	})
+	if _, err := scanner.InspectTCP(ctx, netip.MustParseAddr("192.0.2.10"), TCPProfileServices); !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context canceled", err)
+	}
 }
 
-func (connection *probeConn) Read(buffer []byte) (int, error) {
-	if connection.beforeRead != nil {
-		connection.beforeRead()
+func TestAdaptiveConcurrencyBacksOffOnCongestion(t *testing.T) {
+	controller := newAdaptiveConcurrency(4, 32)
+	controller.adjust(inspectionBatchStats{total: 100, timedOut: 5})
+	if controller.current != 8 {
+		t.Fatalf("initial ramp = %d, want 8", controller.current)
 	}
-	if connection.afterRead != nil {
-		defer connection.afterRead()
+	controller.adjust(inspectionBatchStats{total: 100, timedOut: 40})
+	if controller.current != 4 {
+		t.Fatalf("timeout backoff = %d, want 4", controller.current)
 	}
-	if connection.readDelay > 0 {
-		time.Sleep(connection.readDelay)
+	controller.current = 16
+	controller.adjust(inspectionBatchStats{total: 100, timedOut: 40, resourceLimited: 1})
+	if controller.current != 8 {
+		t.Fatalf("resource backoff = %d, want 8", controller.current)
 	}
-	if connection.readErr != nil {
-		return 0, connection.readErr
-	}
-	if connection.readResponse && len(buffer) > 0 {
-		buffer[0] = 1
-		return 1, nil
-	}
-	return 0, nil
 }
 
+func TestInspectionReportsStageTiming(t *testing.T) {
+	var observed StageTiming
+	scanner := New(Config{
+		PortTimeout:        time.Second,
+		PortMinConcurrency: 4,
+		PortMaxConcurrency: 4,
+		DialContext: func(context.Context, string, string) (net.Conn, error) {
+			return nil, syscall.ECONNREFUSED
+		},
+		ObserveStage: func(timing StageTiming) { observed = timing },
+	})
+	if _, err := scanner.InspectTCP(context.Background(), netip.MustParseAddr("192.0.2.10"), TCPProfileServices); err != nil {
+		t.Fatal(err)
+	}
+	if observed.Stage != "tcp-inspection" || observed.WorkItems != len(serviceTCPPorts) || observed.Duration <= 0 {
+		t.Fatalf("stage timing = %#v", observed)
+	}
+}
+
+func BenchmarkPortJobQueue(b *testing.B) {
+	addresses := make([]netip.Addr, 254)
+	address := netip.MustParseAddr("192.0.2.1")
+	for index := range addresses {
+		addresses[index] = address
+		address = address.Next()
+	}
+	ports, err := tcpPortsForProfile(TCPProfileCommon)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	for range b.N {
+		queue := newPortJobQueue(addresses, ports)
+		for {
+			if _, ok := queue.take(); !ok {
+				break
+			}
+		}
+	}
+}
+
+func BenchmarkTCPInspectionScheduler(b *testing.B) {
+	scanner := New(Config{
+		PortTimeout:        time.Second,
+		PortMinConcurrency: 128,
+		PortMaxConcurrency: 1024,
+		DialContext: func(context.Context, string, string) (net.Conn, error) {
+			return nil, syscall.ECONNREFUSED
+		},
+	})
+	address := netip.MustParseAddr("192.0.2.10")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if _, err := scanner.InspectTCP(context.Background(), address, TCPProfileCommon); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkFastDiscoveryScheduler(b *testing.B) {
+	config := DefaultConfig()
+	config.ResolveNames = false
+	config.InterfacePrefixes = testInterfacePrefixes
+	config.NeighborSource = fakeNeighborSource{}
+	config.IdentitySources = []IdentitySource{}
+	config.DialContext = func(context.Context, string, string) (net.Conn, error) {
+		return nil, syscall.ECONNREFUSED
+	}
+	scanner := New(config)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if _, err := scanner.Scan(context.Background(), "192.0.2.0/24"); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+type probeConn struct{}
+
+func (*probeConn) Read([]byte) (int, error)         { return 0, nil }
 func (*probeConn) Write(buffer []byte) (int, error) { return len(buffer), nil }
 func (*probeConn) Close() error                     { return nil }
 func (*probeConn) LocalAddr() net.Addr              { return testAddress("local") }
@@ -256,9 +332,3 @@ type testAddress string
 
 func (address testAddress) Network() string { return string(address) }
 func (address testAddress) String() string  { return string(address) }
-
-type timeoutError struct{}
-
-func (timeoutError) Error() string   { return "timed out" }
-func (timeoutError) Timeout() bool   { return true }
-func (timeoutError) Temporary() bool { return true }

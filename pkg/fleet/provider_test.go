@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,10 +16,18 @@ import (
 )
 
 type fakeScanner struct {
-	result  internalscanner.Result
-	err     error
-	started chan struct{}
-	release chan struct{}
+	result               internalscanner.Result
+	err                  error
+	started              chan struct{}
+	release              chan struct{}
+	inspection           internalscanner.TCPInspection
+	inspectionErr        error
+	inspectionStarted    chan struct{}
+	inspectionRelease    chan struct{}
+	inspectionStartOnce  sync.Once
+	inspectionCalls      atomic.Int32
+	inspectionAddress    netip.Addr
+	inspectionTCPProfile internalscanner.TCPProfile
 }
 
 func (s *fakeScanner) Scan(ctx context.Context, _ string) (internalscanner.Result, error) {
@@ -33,6 +42,23 @@ func (s *fakeScanner) Scan(ctx context.Context, _ string) (internalscanner.Resul
 		}
 	}
 	return s.result, s.err
+}
+
+func (s *fakeScanner) InspectTCP(ctx context.Context, address netip.Addr, profile internalscanner.TCPProfile) (internalscanner.TCPInspection, error) {
+	s.inspectionCalls.Add(1)
+	s.inspectionAddress = address
+	s.inspectionTCPProfile = profile
+	if s.inspectionStarted != nil {
+		s.inspectionStartOnce.Do(func() { close(s.inspectionStarted) })
+	}
+	if s.inspectionRelease != nil {
+		select {
+		case <-s.inspectionRelease:
+		case <-ctx.Done():
+			return internalscanner.TCPInspection{}, ctx.Err()
+		}
+	}
+	return s.inspection, s.inspectionErr
 }
 
 type fakeInventory struct {
@@ -78,6 +104,17 @@ func (i *fakeInventory) List(context.Context) ([]devices.Device, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	return append([]devices.Device(nil), i.items...), nil
+}
+
+func (i *fakeInventory) Get(_ context.Context, id devices.ID) (devices.Device, bool, error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	for _, item := range i.items {
+		if item.ID == id {
+			return item, true, nil
+		}
+	}
+	return devices.Device{}, false, nil
 }
 
 func (i *fakeInventory) Close() error {
@@ -192,6 +229,159 @@ func TestProviderWithSQLiteInventoryPersistsDevices(t *testing.T) {
 func TestProviderRejectsEmptySQLitePath(t *testing.T) {
 	if _, err := NewProvider(ProviderWithSQLiteInventory("")); err == nil {
 		t.Fatal("NewProvider accepted an empty SQLite path")
+	}
+}
+
+func TestProviderInspectsInventoriedDevice(t *testing.T) {
+	device := devices.Device{ID: "dev_test", IP: netip.MustParseAddr("192.0.2.10")}
+	scanner := &fakeScanner{inspection: internalscanner.TCPInspection{
+		OpenPorts:       []uint16{22, 443},
+		Reachable:       true,
+		PortsProbed:     23,
+		PeakConcurrency: 16,
+		Duration:        25 * time.Millisecond,
+	}}
+	p := &Provider{scanner: scanner, inventory: &fakeInventory{items: []devices.Device{device}}}
+
+	result, err := p.InspectPorts(context.Background(), PortInspectionRequest{
+		DeviceID: device.ID,
+		Profile:  PortInspectionServices,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scanner.inspectionAddress != device.IP || scanner.inspectionTCPProfile != internalscanner.TCPProfileServices {
+		t.Fatalf("scanner target = %s %q", scanner.inspectionAddress, scanner.inspectionTCPProfile)
+	}
+	if result.DeviceID != device.ID || result.IP != device.IP || !result.Reachable || result.Cached || result.PortsProbed != 23 || result.PeakConcurrency != 16 {
+		t.Fatalf("result = %#v", result)
+	}
+	if got := result.OpenPorts; len(got) != 2 || got[0] != 22 || got[1] != 443 {
+		t.Fatalf("open ports = %v", got)
+	}
+}
+
+func TestProviderPortInspectionRequiresInventoriedDeviceAndValidProfile(t *testing.T) {
+	scanner := &fakeScanner{}
+	p := &Provider{scanner: scanner, inventory: &fakeInventory{}}
+	if _, err := p.InspectPorts(context.Background(), PortInspectionRequest{DeviceID: "dev_missing"}); !errors.Is(err, ErrDeviceNotFound) {
+		t.Fatalf("missing device error = %v", err)
+	}
+	_, err := p.InspectPorts(context.Background(), PortInspectionRequest{DeviceID: "dev_missing", Profile: "everything"})
+	var invalid *InvalidPortInspectionError
+	if !errors.As(err, &invalid) {
+		t.Fatalf("invalid profile error = %T %v", err, err)
+	}
+	if scanner.inspectionCalls.Load() != 0 {
+		t.Fatalf("scanner calls = %d, want zero", scanner.inspectionCalls.Load())
+	}
+}
+
+func TestProviderCachesAndRefreshesPortInspections(t *testing.T) {
+	now := time.Date(2026, time.July, 18, 14, 0, 0, 0, time.UTC)
+	device := devices.Device{ID: "dev_test", IP: netip.MustParseAddr("192.0.2.10")}
+	scanner := &fakeScanner{inspection: internalscanner.TCPInspection{OpenPorts: []uint16{443}, PortsProbed: 23}}
+	p := &Provider{
+		scanner:       scanner,
+		inventory:     &fakeInventory{items: []devices.Device{device}},
+		inspectionTTL: 5 * time.Minute,
+		inspectionNow: func() time.Time { return now },
+	}
+
+	first, err := p.InspectPorts(context.Background(), PortInspectionRequest{DeviceID: device.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.OpenPorts[0] = 9999
+	cached, err := p.InspectPorts(context.Background(), PortInspectionRequest{DeviceID: device.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cached.Cached || cached.OpenPorts[0] != 443 || scanner.inspectionCalls.Load() != 1 {
+		t.Fatalf("cached result = %#v; calls = %d", cached, scanner.inspectionCalls.Load())
+	}
+	if _, err := p.InspectPorts(context.Background(), PortInspectionRequest{DeviceID: device.ID, Refresh: true}); err != nil {
+		t.Fatal(err)
+	}
+	if scanner.inspectionCalls.Load() != 2 {
+		t.Fatalf("refresh calls = %d, want 2", scanner.inspectionCalls.Load())
+	}
+	now = now.Add(6 * time.Minute)
+	if _, err := p.InspectPorts(context.Background(), PortInspectionRequest{DeviceID: device.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if scanner.inspectionCalls.Load() != 3 {
+		t.Fatalf("expired cache calls = %d, want 3", scanner.inspectionCalls.Load())
+	}
+}
+
+func TestProviderCoalescesConcurrentPortInspections(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	device := devices.Device{ID: "dev_test", IP: netip.MustParseAddr("192.0.2.10")}
+	scanner := &fakeScanner{
+		inspection:        internalscanner.TCPInspection{OpenPorts: []uint16{22}},
+		inspectionStarted: started,
+		inspectionRelease: release,
+	}
+	p := &Provider{scanner: scanner, inventory: &fakeInventory{items: []devices.Device{device}}}
+	results := make(chan PortInspectionResult, 2)
+	errors := make(chan error, 2)
+	for range 2 {
+		go func() {
+			result, err := p.InspectPorts(context.Background(), PortInspectionRequest{DeviceID: device.ID})
+			results <- result
+			errors <- err
+		}()
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("inspection did not start")
+	}
+	close(release)
+	for range 2 {
+		if err := <-errors; err != nil {
+			t.Fatal(err)
+		}
+		<-results
+	}
+	if scanner.inspectionCalls.Load() != 1 {
+		t.Fatalf("scanner calls = %d, want one", scanner.inspectionCalls.Load())
+	}
+}
+
+func TestProviderDoesNotCacheFailedPortInspection(t *testing.T) {
+	device := devices.Device{ID: "dev_test", IP: netip.MustParseAddr("192.0.2.10")}
+	scanner := &fakeScanner{inspectionErr: errors.New("probe failure")}
+	p := &Provider{scanner: scanner, inventory: &fakeInventory{items: []devices.Device{device}}}
+	for range 2 {
+		if _, err := p.InspectPorts(context.Background(), PortInspectionRequest{DeviceID: device.ID}); err == nil {
+			t.Fatal("failed inspection returned no error")
+		}
+	}
+	if scanner.inspectionCalls.Load() != 2 {
+		t.Fatalf("scanner calls = %d, want failed results uncached", scanner.inspectionCalls.Load())
+	}
+}
+
+func TestProviderInvalidatesPortInspectionWhenDeviceAddressChanges(t *testing.T) {
+	device := devices.Device{ID: "dev_test", IP: netip.MustParseAddr("192.0.2.10")}
+	inventory := &fakeInventory{items: []devices.Device{device}}
+	scanner := &fakeScanner{inspection: internalscanner.TCPInspection{OpenPorts: []uint16{22}}}
+	p := &Provider{scanner: scanner, inventory: inventory}
+	if _, err := p.InspectPorts(context.Background(), PortInspectionRequest{DeviceID: device.ID}); err != nil {
+		t.Fatal(err)
+	}
+	inventory.mu.Lock()
+	inventory.items[0].IP = netip.MustParseAddr("192.0.2.25")
+	inventory.mu.Unlock()
+	result, err := p.InspectPorts(context.Background(), PortInspectionRequest{DeviceID: device.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Cached || result.IP.String() != "192.0.2.25" || scanner.inspectionCalls.Load() != 2 {
+		t.Fatalf("result = %#v; calls = %d", result, scanner.inspectionCalls.Load())
 	}
 }
 

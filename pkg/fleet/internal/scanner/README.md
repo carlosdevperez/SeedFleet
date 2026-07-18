@@ -1,59 +1,62 @@
 # Scanner package map
 
-The scanner is intentionally split at protocol and operating-system boundaries
-so a failed discovery signal can be followed without reading unrelated packet
-code. The runtime path is:
+The scanner is split at protocol and operating-system boundaries so a failed
+signal can be followed without reading unrelated network code. Discovery and
+port inspection are deliberately separate capabilities:
 
 ```text
 Scanner.Scan
   ├─ network authorization and CIDR bounds       network.go
-  ├─ fast TCP discovery and neighbor priming     tcp.go
-  ├─ concurrent all-address port sweep           ports.go
-  │   ├─ TCP ports 1-65535                       tcp.go
-  │   └─ UDP ports 1-65535                       udp.go
+  ├─ bounded TCP discovery and neighbor priming  tcp.go
   ├─ neighbor table and MAC aliases              neighbor*.go + alias.go
   ├─ concurrent identity sources                 identity.go
   │   ├─ current machine                         local.go
   │   ├─ SSDP and device-description XML         ssdp.go
   │   └─ mDNS/DNS-SD                             mdns.go + dns.go
   └─ reverse DNS and name finalization           identity.go
+
+Scanner.InspectTCP
+  ├─ explicit services/common/full-tcp profile   ports.go
+  ├─ address-fair adaptive scheduling            ports.go
+  └─ TCP connect and refusal classification      tcp.go
 ```
 
-`scanner.go` is only the coordinator. Protocol packet construction and parsing
-belong in the protocol file, and platform-specific
-system access belongs in a build-tagged `*_linux.go` or `*_other.go` file.
+`scanner.go` remains the discovery coordinator. Protocol packet construction
+and parsing belong in the protocol file, and platform-specific system access
+belongs in a build-tagged `*_linux.go` or `*_other.go` file.
 
-The main extension points are `NeighborSource` and `IdentitySource`. Source
-implementations should return errors normally; the coordinator treats
-independent naming and neighbor failures as best effort while cancellation still
-stops the scan. Linux reads `/proc/net/arp`; the default neighbor source is empty
-on other platforms until a native implementation is added.
+The main discovery extension points are `NeighborSource` and `IdentitySource`.
+Source implementations return errors normally; the coordinator treats
+independent naming and neighbor failures as best effort while cancellation
+still stops the scan. Linux reads `/proc/net/arp`; the default neighbor source
+is empty on other platforms until a native implementation is added.
 
-Identity fields follow deterministic precedence. A MAC alias fills identity
+Identity fields have deterministic precedence. A MAC alias fills identity
 first, configured identity sources fill only missing fields in source order,
-and reverse DNS is the final hostname fallback. The production order is local
-host identity, SSDP, then mDNS/DNS-SD.
+and reverse DNS is the final hostname fallback. Production source order is the
+local host, SSDP, then mDNS/DNS-SD.
 
-Every usable address in the authorized CIDR is included in both full port
-ranges, so a device can be discovered through a service outside a small
-well-known-port list. A fast pass over five common TCP ports primes the neighbor
-cache; the coordinator reads neighbors immediately afterward while the full
-TCP and UDP sweeps continue. Each pass has a bounded worker pool. Full-sweep
-workers atomically claim indices from the address/port product, avoiding both a
-serialized job producer and construction of the Cartesian product in memory.
-Naming sources run concurrently with the transport sweeps.
+Every usable address receives only the small configured TCP discovery set. The
+512-worker pass primes the neighbor cache, which is read immediately afterward.
+Naming sources run concurrently, reverse DNS uses up to 128 workers, and SSDP
+description fetching shares one HTTP transport across up to 64 workers.
 
-TCP reports successful connections. UDP sends an empty datagram and reports
-only ports that reply; a timeout is `open|filtered` in port-scanning terms and
-is deliberately omitted from `OpenUDPPorts` rather than represented as known
-open. Cancellation closes in-flight UDP connections and stops both worker
-pools.
+Explicit TCP inspection accepts only an address selected by `fleet.Provider`
+from inventory. The `services` profile checks a focused set, `common` checks
+ports 1-1024 plus higher fleet services, and `full-tcp` is an explicit 1-65535
+operation. The scheduler walks addresses round-robin, processes bounded batches,
+and ramps from 128 to at most 1,024 workers. A sharp timeout-rate increase or
+local descriptor/socket exhaustion halves the pool. Dialers are reused, open
+ports are sorted, and cancellation stops each batch.
 
-The package intentionally does not include background scan jobs, per-source
-diagnostics, NetBIOS/NBNS, gateway-page scraping, ICMP, service fingerprinting,
-or banner collection. Neighbor and identity sources remain complementary to
-the port sweep. Add a discovery signal only in its own protocol file and keep
-the coordinator small.
+There is no generic UDP port sweep. mDNS and SSDP send valid protocol requests;
+future UDP sources should do the same in their own protocol files. Empty UDP
+datagrams are both slow and too ambiguous to support useful inventory.
 
-Parser fuzz targets are grouped in `protocol_fuzz_test.go`; focused example
-tests remain next to their protocol implementation.
+The package intentionally does not include background scan jobs, public
+per-source diagnostics, NetBIOS/NBNS, gateway-page scraping, ICMP, service
+fingerprinting, or banner collection. Internal stage observations and scheduler
+benchmarks support tuning without expanding the public API.
+
+Parser fuzz targets are grouped in `protocol_fuzz_test.go`; focused examples
+remain next to their protocol implementation.
