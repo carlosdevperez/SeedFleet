@@ -1,8 +1,8 @@
 # SeedFleet
 
-SeedFleet discovers devices on a local IPv4 network and keeps a process-local
-inventory. It is the small discovery foundation for a future fleet management
-system.
+SeedFleet discovers devices on a local IPv4 network and keeps an inventory in
+memory or SQLite. It is the small discovery foundation for a future fleet
+management system.
 
 Only scan networks that you own or are authorized to inspect.
 
@@ -29,6 +29,17 @@ curl http://127.0.0.1:8080/devices
 
 Health checks are available at `GET /health`.
 
+Inventory is kept in memory by default. To retain it across restarts, supply a
+SQLite file:
+
+```sh
+go run ./cmd/seedfleet --database ./seedfleet.db
+```
+
+Omit `--database` to switch back to the in-memory implementation. Both stores
+implement the same provider-owned interface and use the same device refresh
+rules.
+
 ## API
 
 The API is intentionally small:
@@ -36,13 +47,15 @@ The API is intentionally small:
 | Method and path | Behavior |
 | --- | --- |
 | `POST /scans` | Validates the CIDR, performs discovery, stores the observations, and returns the observed device collection with `200 OK` |
-| `GET /devices` | Returns the accumulated in-memory inventory |
+| `GET /devices` | Returns the accumulated inventory |
 | `GET /health` | Returns `{"status":"ok"}` |
 
 Scan requests require `Content-Type: application/json`. Unknown JSON fields and
 multiple JSON values are rejected. An invalid or unauthorized network returns
 `400 Bad Request`; a second scan while one is running returns `409 Conflict`.
 There are no background scan jobs or inventory query language at this stage.
+Every device representation includes an opaque `id` that remains stable when a
+known MAC address moves to another IP address.
 
 ## Discovery
 
@@ -110,7 +123,7 @@ cmd/seedfleet/                  executable and application entrypoint
 pkg/cmd/seedfleet/              server command and HTTP transport
 pkg/fleet/                      public discovery/inventory provider
 pkg/fleet/devices/              public device types and merge rules
-pkg/fleet/internal/inventory/   private in-memory store
+pkg/fleet/internal/inventory/   private memory and SQLite stores
 pkg/fleet/internal/scanner/     private network discovery implementation
 ```
 
@@ -128,4 +141,5 @@ make race
 make verify
 ```
 
-The inventory is intentionally in memory and is lost when the process stops.
+The default in-memory inventory is lost when the process stops. Use
+`--database` when persistence is needed.

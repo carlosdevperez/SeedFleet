@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -49,6 +50,10 @@ func (i *fakeInventory) List(context.Context) ([]devices.Device, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	return append([]devices.Device(nil), i.items...), nil
+}
+
+func (i *fakeInventory) Close() error {
+	return nil
 }
 
 func TestProviderScansAndStoresDevices(t *testing.T) {
@@ -116,5 +121,48 @@ func TestProviderMapsInvalidNetworkError(t *testing.T) {
 func TestProviderRejectsRoutedNetworksWithoutAllowlist(t *testing.T) {
 	if _, err := NewProvider(ProviderWithRoutedNetworks()); err == nil {
 		t.Fatal("NewProvider accepted routed scans without an allowlist")
+	}
+}
+
+func TestProviderWithSQLiteInventoryPersistsDevices(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "seedfleet.db")
+	provider, err := NewProvider(ProviderWithSQLiteInventory(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := devices.Device{IP: netip.MustParseAddr("192.0.2.10"), MAC: "aa:bb:cc:dd:ee:ff", Name: "printer"}
+	provider.scanner = &fakeScanner{result: internalscanner.Result{
+		Network: "192.0.2.0/24",
+		Devices: []devices.Device{want},
+	}}
+	result, err := provider.Scan(context.Background(), "192.0.2.0/24")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := NewProvider(ProviderWithSQLiteInventory(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := reopened.Close(); err != nil {
+			t.Errorf("close provider: %v", err)
+		}
+	})
+	items, err := reopened.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].ID != result.Devices[0].ID || items[0].Name != want.Name {
+		t.Fatalf("reopened inventory = %#v", items)
+	}
+}
+
+func TestProviderRejectsEmptySQLitePath(t *testing.T) {
+	if _, err := NewProvider(ProviderWithSQLiteInventory("")); err == nil {
+		t.Fatal("NewProvider accepted an empty SQLite path")
 	}
 }

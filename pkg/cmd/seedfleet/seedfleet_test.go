@@ -51,6 +51,7 @@ func TestScanEndpoint(t *testing.T) {
 
 func TestListDevicesEndpoint(t *testing.T) {
 	provider := &fakeProvider{items: []devices.Device{{
+		ID:           "dev_test",
 		IP:           netip.MustParseAddr("192.0.2.5"),
 		Name:         "printer",
 		OpenPorts:    []uint16{},
@@ -62,7 +63,7 @@ func TestListDevicesEndpoint(t *testing.T) {
 
 	handler.ServeHTTP(response, request)
 
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"name":"printer"`) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"id":"dev_test"`) || !strings.Contains(response.Body.String(), `"name":"printer"`) {
 		t.Fatalf("status = %d; body: %s", response.Code, response.Body.String())
 	}
 }
@@ -99,13 +100,14 @@ func TestParseFlags(t *testing.T) {
 	flags, err := parseFlags([]string{
 		"--address", "127.0.0.1:18080",
 		"--aliases", "",
+		"--database", "/tmp/seedfleet-test.db",
 		"--allow-network", "192.168.1.4/24",
 		"--allow-routed-networks",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if flags.Address != "127.0.0.1:18080" || flags.AliasFile != "" || !flags.AllowRoutedNetworks {
+	if flags.Address != "127.0.0.1:18080" || flags.AliasFile != "" || flags.DatabaseFile != "/tmp/seedfleet-test.db" || !flags.AllowRoutedNetworks {
 		t.Fatalf("flags = %#v", flags)
 	}
 	if len(flags.AllowedNetworks) != 1 || flags.AllowedNetworks[0] != netip.MustParsePrefix("192.168.1.0/24") {

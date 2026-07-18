@@ -45,24 +45,29 @@ status codes and strict request decoding stay here.
 ### `pkg/fleet`
 
 `Provider` is the public API and the extension point for fleet management. It
-currently exposes two operations:
+exposes two inventory operations and one lifecycle operation:
 
 - `Scan`, which allows one active scan and stores successful observations; and
-- `List`, which returns the current inventory.
+- `List`, which returns the current inventory; and
+- `Close`, which releases the configured inventory.
 
-Provider options configure aliases and network authorization without exposing
-scanner implementation types.
+Provider options configure aliases, network authorization, and optional SQLite
+persistence without exposing implementation types.
 
 ### `pkg/fleet/devices`
 
-This package defines public device data and the rules for combining same-scan
-observations and refreshing historical inventory identity.
+This package defines public device data, its durable opaque ID, and the rules
+for combining same-scan observations and refreshing historical inventory
+identity. Stores reconcile a known MAC address before its IP so the ID survives
+DHCP address changes.
 
 ### `pkg/fleet/internal`
 
-The scanner and memory inventory are private implementation packages. The Go
-toolchain enforces this boundary, replacing the previous custom import-graph
-test.
+The scanner plus the memory and SQLite inventories are private implementation
+packages. `Provider` owns a narrow inventory interface containing only `Save`,
+`List`, and `Close`, so tests and implementations can be swapped without
+exposing storage through the public API. The Go toolchain enforces this
+boundary, replacing the previous custom import-graph test.
 
 The scanner keeps protocol implementations isolated because packet parsing and
 platform-specific system access are independently debugged. Its local README
@@ -77,8 +82,8 @@ design:
   should be added only when a real caller needs them.
 - Inventory exposes `List` rather than a general query language. Filtering can
   be introduced with a concrete fleet-management use case.
-- The memory store is selected inside `Provider`; there is no public repository
-  abstraction while only one implementation exists.
+- The memory store remains the default. `ProviderWithSQLiteInventory` selects
+  persistence, and the server exposes that choice as `--database`.
 - Optional discovery sources are best effort. Their failures do not expand the
   public API into a diagnostics framework.
 - NetBIOS and gateway-page scraping are not part of discovery. New signals
@@ -97,7 +102,5 @@ These are product decisions, not missing layers to recreate preemptively.
 - Prefer a focused package over a generic `service`, `adapter`, or `utils`
   package.
 
-Before adding persistence or enrollment, define a durable device identity that
-does not rely only on an IP address. If a second inventory implementation or a
-second transport becomes necessary, introduce a narrow interface at its
-consumer and extract only the capability that now has multiple implementations.
+Keep storage interfaces narrow and owned by their consumer. Extend the durable
+identity model before adding identity signals beyond MAC address and IP fallback.

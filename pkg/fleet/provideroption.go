@@ -1,14 +1,17 @@
 package fleet
 
 import (
+	"errors"
 	"fmt"
 	"net/netip"
 
+	"github.com/carlosdevperez/seedfleet/pkg/fleet/internal/inventory"
 	internalscanner "github.com/carlosdevperez/seedfleet/pkg/fleet/internal/scanner"
 )
 
 type providerOptions struct {
 	scannerConfig internalscanner.Config
+	newInventory  func() (deviceInventory, error)
 }
 
 // ProviderOption configures a Provider.
@@ -56,6 +59,23 @@ func ProviderWithAllowedNetworks(networks ...netip.Prefix) ProviderOption {
 func ProviderWithRoutedNetworks() ProviderOption {
 	return providerOption(func(opts *providerOptions) error {
 		opts.scannerConfig.AllowRoutedNetworks = true
+		return nil
+	})
+}
+
+// ProviderWithSQLiteInventory persists devices in the SQLite database at path.
+func ProviderWithSQLiteInventory(path string) ProviderOption {
+	return providerOption(func(opts *providerOptions) error {
+		if path == "" {
+			return errors.New("SQLite inventory path is required")
+		}
+		opts.newInventory = func() (deviceInventory, error) {
+			store, err := inventory.NewSQLite(path)
+			if err != nil {
+				return nil, fmt.Errorf("configure SQLite inventory: %w", err)
+			}
+			return store, nil
+		}
 		return nil
 	})
 }

@@ -18,6 +18,7 @@ import (
 type flagpole struct {
 	Address             string
 	AliasFile           string
+	DatabaseFile        string
 	AllowedNetworks     prefixList
 	AllowRoutedNetworks bool
 }
@@ -35,10 +36,18 @@ func Run(ctx context.Context, args []string) error {
 	if flags.AllowRoutedNetworks {
 		options = append(options, fleet.ProviderWithRoutedNetworks())
 	}
+	if flags.DatabaseFile != "" {
+		options = append(options, fleet.ProviderWithSQLiteInventory(flags.DatabaseFile))
+	}
 	provider, err := fleet.NewProvider(options...)
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if err := provider.Close(); err != nil {
+			log.Printf("inventory shutdown: %v", err)
+		}
+	}()
 
 	server := &http.Server{
 		Addr:              flags.Address,
@@ -64,6 +73,7 @@ func parseFlags(args []string) (*flagpole, error) {
 	set := flag.NewFlagSet("seedfleet", flag.ContinueOnError)
 	set.StringVar(&flags.Address, "address", "127.0.0.1:8080", "HTTP server listen address")
 	set.StringVar(&flags.AliasFile, "aliases", "device-aliases.json", "optional JSON file mapping MAC addresses to device identities")
+	set.StringVar(&flags.DatabaseFile, "database", "", "SQLite inventory file; empty keeps inventory in memory")
 	set.Var(&flags.AllowedNetworks, "allow-network", "CIDR that may be scanned; repeat for multiple networks")
 	set.BoolVar(&flags.AllowRoutedNetworks, "allow-routed-networks", false, "allow allowlisted networks that are not directly connected")
 	if err := set.Parse(args); err != nil {
