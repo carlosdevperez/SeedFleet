@@ -75,7 +75,7 @@ func applyIdentities(foundByIP map[netip.Addr]devices.Device, prefix netip.Prefi
 			item := foundByIP[identity.IP]
 			if !item.IP.IsValid() {
 				now := time.Now().UTC()
-				item = devices.Device{IP: identity.IP, OpenPorts: []uint16{}, FirstSeen: now, LastSeen: now}
+				item = devices.Device{IP: identity.IP, OpenPorts: []uint16{}, OpenUDPPorts: []uint16{}, FirstSeen: now, LastSeen: now}
 			}
 			if item.Name == "" {
 				item.Name = identity.Name

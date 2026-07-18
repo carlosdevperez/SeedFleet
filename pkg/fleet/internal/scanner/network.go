@@ -136,6 +136,15 @@ func forEachUsableAddress(prefix netip.Prefix, count uint64, visit func(netip.Ad
 	}
 }
 
+func usableAddresses(prefix netip.Prefix, count uint64) []netip.Addr {
+	addresses := make([]netip.Addr, 0, usableAddressCount(prefix, count))
+	forEachUsableAddress(prefix, count, func(address netip.Addr) bool {
+		addresses = append(addresses, address)
+		return true
+	})
+	return addresses
+}
+
 func isReservedAddress(prefix netip.Prefix, count uint64, address netip.Addr) bool {
 	if prefix.Bits() > 30 {
 		return false

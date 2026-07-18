@@ -23,7 +23,7 @@ func TestValidateNetwork(t *testing.T) {
 
 func TestScannerAcceptsOnlyDirectlyConnectedNetworksByDefault(t *testing.T) {
 	config := Config{
-		Ports: []uint16{80}, Timeout: time.Millisecond, Concurrency: 1, MaxAddresses: 4096,
+		Timeout: time.Millisecond, Concurrency: 1, MaxAddresses: 4096,
 		InterfacePrefixes: func() ([]netip.Prefix, error) {
 			return []netip.Prefix{netip.MustParsePrefix("192.168.1.4/24")}, nil
 		},
@@ -45,7 +45,7 @@ func TestScannerAcceptsOnlyDirectlyConnectedNetworksByDefault(t *testing.T) {
 
 func TestScannerEnforcesAllowlist(t *testing.T) {
 	config := Config{
-		Ports: []uint16{80}, Timeout: time.Millisecond, Concurrency: 1, MaxAddresses: 4096,
+		Timeout: time.Millisecond, Concurrency: 1, MaxAddresses: 4096,
 		AllowedNetworks: []netip.Prefix{netip.MustParsePrefix("192.168.1.0/25")},
 		InterfacePrefixes: func() ([]netip.Prefix, error) {
 			return []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")}, nil
@@ -62,7 +62,7 @@ func TestScannerEnforcesAllowlist(t *testing.T) {
 
 func TestScannerAllowsExplicitlyAllowlistedRoutedNetwork(t *testing.T) {
 	scanner := New(Config{
-		Ports: []uint16{80}, Timeout: time.Millisecond, Concurrency: 1, MaxAddresses: 4096,
+		Timeout: time.Millisecond, Concurrency: 1, MaxAddresses: 4096,
 		AllowedNetworks:     []netip.Prefix{netip.MustParsePrefix("10.20.0.0/16")},
 		AllowRoutedNetworks: true,
 		InterfacePrefixes: func() ([]netip.Prefix, error) {
@@ -76,7 +76,7 @@ func TestScannerAllowsExplicitlyAllowlistedRoutedNetwork(t *testing.T) {
 
 func TestScannerRejectsRoutedModeWithoutAllowlist(t *testing.T) {
 	scanner := New(Config{
-		Ports: []uint16{80}, Timeout: time.Millisecond, Concurrency: 1, MaxAddresses: 4096,
+		Timeout: time.Millisecond, Concurrency: 1, MaxAddresses: 4096,
 		AllowRoutedNetworks: true,
 	})
 	if _, err := scanner.ValidateNetwork("192.168.1.0/24"); err == nil {

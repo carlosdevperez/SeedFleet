@@ -101,6 +101,7 @@ type deviceResponse struct {
 	Manufacturer string     `json:"manufacturer,omitempty"`
 	Hostname     string     `json:"hostname,omitempty"`
 	OpenPorts    []uint16   `json:"openPorts"`
+	OpenUDPPorts []uint16   `json:"openUdpPorts"`
 	DiscoveredBy []string   `json:"discoveredBy"`
 	FirstSeen    time.Time  `json:"firstSeen"`
 	LastSeen     time.Time  `json:"lastSeen"`
@@ -116,6 +117,7 @@ func deviceCollectionFrom(network string, items []devices.Device) deviceCollecti
 			Manufacturer: item.Manufacturer,
 			Hostname:     item.Hostname,
 			OpenPorts:    append([]uint16{}, item.OpenPorts...),
+			OpenUDPPorts: append([]uint16{}, item.OpenUDPPorts...),
 			DiscoveredBy: append([]string{}, item.DiscoveredBy...),
 			FirstSeen:    item.FirstSeen,
 			LastSeen:     item.LastSeen,

@@ -12,29 +12,17 @@ import (
 	"time"
 )
 
-type probeJob struct {
-	address netip.Addr
-	port    uint16
-}
-
-type probeResult struct {
-	address   netip.Addr
-	port      uint16
-	open      bool
-	reachable bool
-}
-
-func (s *Scanner) scanTCPPorts(ctx context.Context, addresses []netip.Addr) (protocolPortScan, error) {
+func (s *Scanner) scanUDPPorts(ctx context.Context, addresses []netip.Addr) (protocolPortScan, error) {
 	portScan := protocolPortScan{
 		open:      make(map[netip.Addr][]uint16, len(addresses)),
 		reachable: make(map[netip.Addr]struct{}, len(addresses)),
 	}
-	if len(addresses) == 0 || !s.config.TCPPortRange.enabled() {
+	if len(addresses) == 0 || !s.config.UDPPortRange.enabled() {
 		return portScan, nil
 	}
 
-	workerCount := boundedWorkerCount(s.config.ProbeConcurrency, len(addresses), s.config.TCPPortRange)
-	jobs := newPortJobQueue(addresses, s.config.TCPPortRange)
+	workerCount := boundedWorkerCount(s.config.ProbeConcurrency, len(addresses), s.config.UDPPortRange)
+	jobs := newPortJobQueue(addresses, s.config.UDPPortRange)
 	results := make(chan probeResult, workerCount)
 	var reported sync.Map
 	var workers sync.WaitGroup
@@ -50,7 +38,7 @@ func (s *Scanner) scanTCPPorts(ctx context.Context, addresses []netip.Addr) (pro
 				if !ok {
 					return
 				}
-				open, reachable := s.probePort(ctx, job.address, job.port, s.config.PortTimeout)
+				open, reachable := s.probeUDPPort(ctx, job.address, job.port)
 				if !reachable {
 					continue
 				}
@@ -88,19 +76,47 @@ func (s *Scanner) scanTCPPorts(ctx context.Context, addresses []netip.Addr) (pro
 	return portScan, nil
 }
 
-func (s *Scanner) probePort(ctx context.Context, address netip.Addr, port uint16, timeout time.Duration) (open, reachable bool) {
+// probeUDPPort sends an empty UDP datagram and reports the port as open only
+// when the endpoint replies. A timeout is not considered open because UDP
+// cannot distinguish a silent service from a firewall that dropped the probe.
+func (s *Scanner) probeUDPPort(ctx context.Context, address netip.Addr, port uint16) (open, reachable bool) {
 	endpoint := net.JoinHostPort(address.String(), strconv.Itoa(int(port)))
 	var connection net.Conn
 	var err error
 	if s.config.DialContext != nil {
-		connection, err = s.config.DialContext(ctx, "tcp", endpoint)
+		connection, err = s.config.DialContext(ctx, "udp4", endpoint)
 	} else {
-		dialer := net.Dialer{Timeout: timeout}
-		connection, err = dialer.DialContext(ctx, "tcp", endpoint)
+		dialer := net.Dialer{Timeout: s.config.PortTimeout}
+		connection, err = dialer.DialContext(ctx, "udp4", endpoint)
 	}
-	if err == nil {
+	if err != nil {
+		return false, udpHostReachable(err)
+	}
+	defer connection.Close()
+
+	deadline := time.Now().Add(s.config.PortTimeout)
+	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
+	}
+	if err := connection.SetDeadline(deadline); err != nil {
+		return false, false
+	}
+	stopCancellation := context.AfterFunc(ctx, func() {
 		_ = connection.Close()
+	})
+	defer stopCancellation()
+
+	if _, err := connection.Write(nil); err != nil {
+		return false, udpHostReachable(err)
+	}
+	var response [2048]byte
+	_, err = connection.Read(response[:])
+	if err == nil {
 		return true, true
 	}
-	return false, errors.Is(err, syscall.ECONNREFUSED)
+	return false, udpHostReachable(err)
+}
+
+func udpHostReachable(err error) bool {
+	return errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET)
 }

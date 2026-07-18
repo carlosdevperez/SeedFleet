@@ -17,14 +17,14 @@ func TestInventorySavePreservesIdentityAndFirstSeen(t *testing.T) {
 
 	_, err := inventory.Save(context.Background(), []devices.Device{{
 		IP: ip, MAC: "aa:bb:cc:dd:ee:ff", Name: "Office printer", Manufacturer: "Example Corp",
-		Hostname: "printer.local", OpenPorts: []uint16{80}, DiscoveredBy: []string{"tcp"},
+		Hostname: "printer.local", OpenPorts: []uint16{80}, OpenUDPPorts: []uint16{161}, DiscoveredBy: []string{"tcp", "udp"},
 		FirstSeen: first, LastSeen: first,
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	updated, err := inventory.Save(context.Background(), []devices.Device{{
-		IP: ip, OpenPorts: []uint16{443}, DiscoveredBy: []string{"neighbor"}, FirstSeen: later, LastSeen: later,
+		IP: ip, OpenPorts: []uint16{443}, OpenUDPPorts: []uint16{5353}, DiscoveredBy: []string{"neighbor"}, FirstSeen: later, LastSeen: later,
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -39,8 +39,11 @@ func TestInventorySavePreservesIdentityAndFirstSeen(t *testing.T) {
 	if len(item.OpenPorts) != 1 || item.OpenPorts[0] != 443 {
 		t.Fatalf("OpenPorts = %v, want [443]", item.OpenPorts)
 	}
-	if got := item.DiscoveredBy; len(got) != 2 || got[0] != "tcp" || got[1] != "neighbor" {
-		t.Fatalf("DiscoveredBy = %v, want [tcp neighbor]", got)
+	if len(item.OpenUDPPorts) != 1 || item.OpenUDPPorts[0] != 5353 {
+		t.Fatalf("OpenUDPPorts = %v, want [5353]", item.OpenUDPPorts)
+	}
+	if got := item.DiscoveredBy; len(got) != 3 || got[0] != "tcp" || got[1] != "udp" || got[2] != "neighbor" {
+		t.Fatalf("DiscoveredBy = %v, want [tcp udp neighbor]", got)
 	}
 }
 
@@ -48,7 +51,7 @@ func TestInventoryListSortsAndReturnsCopies(t *testing.T) {
 	inventory := New()
 	now := time.Now()
 	_, err := inventory.Save(context.Background(), []devices.Device{
-		{IP: netip.MustParseAddr("192.0.2.20"), OpenPorts: []uint16{80}, FirstSeen: now, LastSeen: now},
+		{IP: netip.MustParseAddr("192.0.2.20"), OpenPorts: []uint16{80}, OpenUDPPorts: []uint16{53}, FirstSeen: now, LastSeen: now},
 		{IP: netip.MustParseAddr("192.0.2.3"), OpenPorts: []uint16{22}, FirstSeen: now, LastSeen: now},
 	})
 	if err != nil {
@@ -63,12 +66,16 @@ func TestInventoryListSortsAndReturnsCopies(t *testing.T) {
 		t.Fatalf("first IP = %s, want 192.0.2.3", got)
 	}
 	items[0].OpenPorts[0] = 9999
+	items[1].OpenUDPPorts[0] = 9999
 	stored, err := inventory.List(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if stored[0].OpenPorts[0] != 22 {
 		t.Fatalf("stored port changed through returned slice: %d", stored[0].OpenPorts[0])
+	}
+	if stored[1].OpenUDPPorts[0] != 53 {
+		t.Fatalf("stored UDP port changed through returned slice: %d", stored[1].OpenUDPPorts[0])
 	}
 }
 

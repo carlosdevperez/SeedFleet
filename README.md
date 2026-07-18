@@ -13,7 +13,9 @@ go run ./cmd/seedfleet
 ```
 
 The server listens on `127.0.0.1:8080` by default. A scan is synchronous and
-only one may run at a time:
+only one may run at a time. A complete all-port scan can take several minutes
+or longer depending on the requested CIDR size and how many probes are silently
+dropped:
 
 ```sh
 curl -X POST http://127.0.0.1:8080/scans \
@@ -43,12 +45,25 @@ Scan requests require `Content-Type: application/json`. Unknown JSON fields and
 multiple JSON values are rejected. An invalid or unauthorized network returns
 `400 Bad Request`; a second scan while one is running returns `409 Conflict`.
 There are no background scan jobs or inventory query language at this stage.
+Canceling the HTTP request cancels outstanding discovery and port probes.
+
+Device responses expose open TCP ports in the existing `openPorts` array and
+open UDP ports in `openUdpPorts`:
+
+```json
+{
+  "ip": "192.168.1.20",
+  "openPorts": [22, 443],
+  "openUdpPorts": [53, 5353]
+}
+```
 
 ## Discovery
 
-SeedFleet combines a small set of complementary signals:
+SeedFleet combines a complete port sweep with complementary discovery signals:
 
-- bounded TCP connect probes on ports 22, 80, 443, 445, and 3389;
+- TCP connect probes on ports 1 through 65,535 for every usable address;
+- UDP datagram probes on ports 1 through 65,535 for every usable address;
 - the Linux IPv4 neighbor table when available;
 - local host identity;
 - reverse DNS;
@@ -57,9 +72,21 @@ SeedFleet combines a small set of complementary signals:
 - optional MAC-address aliases.
 
 Successful TCP connections and explicit connection refusals both prove that a
-host is reachable. On Linux, TCP attempts populate the neighbor cache and the
-scanner then reads complete entries from `/proc/net/arp`. This also finds many
-quiet devices that drop all configured TCP probes.
+host is reachable. On Linux, the port attempts populate the neighbor cache and
+the scanner then reads complete entries from `/proc/net/arp`. This also finds
+quiet devices that drop every port probe.
+
+TCP and UDP use separate bounded worker pools and run concurrently. Workers
+atomically claim jobs from the address/port range instead of serializing behind
+a single producer, and only positive observations are retained. The complete
+target matrix is therefore covered without allocating it in memory.
+
+A successful TCP connection is reported as open. UDP has no generic handshake,
+so SeedFleet sends an empty datagram to each UDP port and reports a port as open
+only if the endpoint replies. A silent UDP probe is inherently ambiguous—it may
+be open with an application that ignores the empty payload, or a firewall may
+have filtered it—so silence is not mislabeled as an open port. The sweep does
+not perform application banner or version detection.
 
 There is no universal unauthenticated protocol for device names. Aliases keep
 names stable for devices that advertise identity intermittently:
@@ -98,6 +125,9 @@ go run ./cmd/seedfleet \
   --allow-network 10.20.0.0/16 \
   --allow-routed-networks
 ```
+
+An all-port sweep produces substantial network traffic. Scan only networks you
+own or are authorized to inspect, and start with a narrow CIDR when possible.
 
 ## Project layout
 

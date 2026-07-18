@@ -34,7 +34,6 @@ func testInterfacePrefixes() ([]netip.Prefix, error) {
 
 func TestScanIncludesQuietHostFromNeighborTable(t *testing.T) {
 	scanner := New(Config{
-		Ports:             []uint16{1},
 		Timeout:           time.Nanosecond,
 		Concurrency:       2,
 		MaxAddresses:      4,
@@ -66,7 +65,6 @@ func TestScanIncludesQuietHostFromNeighborTable(t *testing.T) {
 
 func TestScanIncludesHostFromNameDiscovery(t *testing.T) {
 	scanner := New(Config{
-		Ports:             []uint16{1},
 		Timeout:           time.Nanosecond,
 		Concurrency:       2,
 		MaxAddresses:      4,
@@ -98,7 +96,6 @@ func TestScanPrefersAliasIdentity(t *testing.T) {
 	mac := "aa:bb:cc:dd:ee:ff"
 	address := netip.MustParseAddr("192.0.2.2")
 	scanner := New(Config{
-		Ports:             []uint16{1},
 		Timeout:           time.Nanosecond,
 		Concurrency:       2,
 		MaxAddresses:      4,
@@ -140,7 +137,6 @@ func TestScanClassifiesInvalidNetworkInput(t *testing.T) {
 
 func TestScanIgnoresUnavailableOptionalSources(t *testing.T) {
 	scanner := New(Config{
-		Ports:             []uint16{1},
 		Timeout:           time.Nanosecond,
 		Concurrency:       2,
 		MaxAddresses:      4,

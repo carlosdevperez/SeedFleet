@@ -56,7 +56,9 @@ scanner implementation types.
 ### `pkg/fleet/devices`
 
 This package defines public device data and the rules for combining same-scan
-observations and refreshing historical inventory identity.
+observations and refreshing historical inventory identity. `OpenPorts` retains
+the established TCP-port representation, while `OpenUDPPorts` records UDP
+ports that responded to a probe. Both collections represent the latest scan.
 
 ### `pkg/fleet/internal`
 
@@ -67,6 +69,12 @@ test.
 The scanner keeps protocol implementations isolated because packet parsing and
 platform-specific system access are independently debugged. Its local README
 maps the coordinator to each protocol file.
+
+The scanner runs complete TCP and UDP port ranges concurrently for every usable
+address in the authorized CIDR while identity protocols gather complementary
+observations. It reads neighbors after the sweep so Linux has a chance to
+populate its cache. `Provider` still owns scan serialization and commits only
+the completed observation batch to inventory.
 
 ## Deliberate simplifications
 

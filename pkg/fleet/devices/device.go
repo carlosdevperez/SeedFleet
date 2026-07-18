@@ -14,15 +14,20 @@ type Device struct {
 	Name         string
 	Manufacturer string
 	Hostname     string
-	OpenPorts    []uint16
+	// OpenPorts contains open TCP ports. It retains its original name for
+	// compatibility with existing Provider consumers and HTTP representations.
+	OpenPorts []uint16
+	// OpenUDPPorts contains UDP ports that replied to a probe. Silent UDP ports
+	// are ambiguous and are not included.
+	OpenUDPPorts []uint16
 	DiscoveredBy []string
 	FirstSeen    time.Time
 	LastSeen     time.Time
 }
 
 // Refresh combines a new scan result with historical inventory identity. Open
-// ports represent the new scan, while stable identity and discovery history are
-// preserved when the new observation cannot provide them.
+// TCP and UDP ports represent the new scan, while stable identity and discovery
+// history are preserved when the new observation cannot provide them.
 func Refresh(existing, current Device) Device {
 	if !existing.IP.IsValid() {
 		return current
@@ -67,6 +72,7 @@ func Combine(existing, found Device) Device {
 		found.Hostname = existing.Hostname
 	}
 	found.OpenPorts = mergePorts(existing.OpenPorts, found.OpenPorts)
+	found.OpenUDPPorts = mergePorts(existing.OpenUDPPorts, found.OpenUDPPorts)
 	found.DiscoveredBy = mergeStrings(existing.DiscoveredBy, found.DiscoveredBy)
 	if found.FirstSeen.IsZero() || (!existing.FirstSeen.IsZero() && existing.FirstSeen.Before(found.FirstSeen)) {
 		found.FirstSeen = existing.FirstSeen

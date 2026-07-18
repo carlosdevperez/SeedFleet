@@ -14,8 +14,10 @@ import (
 
 // Config controls bounded network activity and provides seams for tests.
 type Config struct {
-	Ports               []uint16
+	TCPPortRange        PortRange
+	UDPPortRange        PortRange
 	Timeout             time.Duration
+	PortTimeout         time.Duration
 	Concurrency         int
 	ProbeConcurrency    int
 	MaxAddresses        uint64
@@ -38,8 +40,10 @@ type Result struct {
 // DefaultConfig returns the production scanner configuration.
 func DefaultConfig() Config {
 	return Config{
-		Ports:            []uint16{22, 80, 443, 445, 3389},
+		TCPPortRange:     allPorts,
+		UDPPortRange:     allPorts,
 		Timeout:          300 * time.Millisecond,
+		PortTimeout:      100 * time.Millisecond,
 		Concurrency:      64,
 		ProbeConcurrency: 256,
 		MaxAddresses:     4096,
@@ -102,8 +106,14 @@ func (s *Scanner) validateConfig() error {
 	if s.config.Concurrency < 1 {
 		return errors.New("scanner concurrency must be at least 1")
 	}
-	if len(s.config.Ports) == 0 {
-		return errors.New("at least one TCP port is required")
+	if err := s.config.TCPPortRange.validate("TCP"); err != nil {
+		return err
+	}
+	if err := s.config.UDPPortRange.validate("UDP"); err != nil {
+		return err
+	}
+	if (s.config.TCPPortRange.enabled() || s.config.UDPPortRange.enabled()) && s.config.PortTimeout <= 0 {
+		return errors.New("port probe timeout must be greater than zero")
 	}
 	return nil
 }
@@ -117,10 +127,13 @@ func (s *Scanner) Scan(ctx context.Context, network string) (Result, error) {
 	}
 
 	identityResults := s.startIdentitySources(ctx, prefix)
-	foundByIP, err := s.scanTCP(ctx, prefix, count)
-	if err != nil {
-		return Result{}, err
+	addresses := usableAddresses(prefix, count)
+	ports := <-s.startPortScan(ctx, addresses)
+	if ports.err != nil {
+		return Result{}, ports.err
 	}
+	foundByIP := make(map[netip.Addr]devices.Device)
+	applyPortScan(foundByIP, ports)
 	if err := s.scanNeighbors(ctx, prefix, count, foundByIP); err != nil {
 		return Result{}, err
 	}

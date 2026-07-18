@@ -13,8 +13,8 @@ func TestTCPPortsAreProbedConcurrently(t *testing.T) {
 	var active atomic.Int32
 	var maximum atomic.Int32
 	scanner := New(Config{
-		Ports:             []uint16{80, 443},
-		Timeout:           time.Second,
+		TCPPortRange:      PortRange{First: 80, Last: 81},
+		PortTimeout:       time.Second,
 		Concurrency:       2,
 		ProbeConcurrency:  4,
 		MaxAddresses:      4,

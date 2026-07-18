@@ -35,6 +35,7 @@ func (s *Scanner) scanNeighbors(ctx context.Context, prefix netip.Prefix, count 
 			IP:           neighbor.IP,
 			MAC:          neighbor.MAC.String(),
 			OpenPorts:    []uint16{},
+			OpenUDPPorts: []uint16{},
 			DiscoveredBy: []string{"neighbor"},
 			FirstSeen:    now,
 			LastSeen:     now,

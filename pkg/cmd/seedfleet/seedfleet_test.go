@@ -54,6 +54,7 @@ func TestListDevicesEndpoint(t *testing.T) {
 		IP:           netip.MustParseAddr("192.0.2.5"),
 		Name:         "printer",
 		OpenPorts:    []uint16{},
+		OpenUDPPorts: []uint16{5353},
 		DiscoveredBy: []string{"mdns"},
 	}}}
 	handler := newHandler(provider)
@@ -62,7 +63,7 @@ func TestListDevicesEndpoint(t *testing.T) {
 
 	handler.ServeHTTP(response, request)
 
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"name":"printer"`) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"name":"printer"`) || !strings.Contains(response.Body.String(), `"openUdpPorts":[5353]`) {
 		t.Fatalf("status = %d; body: %s", response.Code, response.Body.String())
 	}
 }

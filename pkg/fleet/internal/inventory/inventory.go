@@ -43,6 +43,7 @@ func (i *Inventory) upsertLocked(found devices.Device) devices.Device {
 		found = devices.Refresh(existing, found)
 	}
 	found.OpenPorts = clonePorts(found.OpenPorts)
+	found.OpenUDPPorts = clonePorts(found.OpenUDPPorts)
 	found.DiscoveredBy = append([]string(nil), found.DiscoveredBy...)
 	i.devices[found.IP] = found
 	return clone(found)
@@ -74,6 +75,7 @@ func (i *Inventory) rebuildSnapshotLocked() {
 
 func clone(item devices.Device) devices.Device {
 	item.OpenPorts = clonePorts(item.OpenPorts)
+	item.OpenUDPPorts = clonePorts(item.OpenUDPPorts)
 	item.DiscoveredBy = append([]string(nil), item.DiscoveredBy...)
 	return item
 }
