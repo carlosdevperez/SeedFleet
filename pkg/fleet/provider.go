@@ -36,7 +36,13 @@ type scanner interface {
 type deviceInventory interface {
 	Save(context.Context, []devices.Device) ([]devices.Device, error)
 	List(context.Context) ([]devices.Device, error)
+	Close() error
 }
+
+var (
+	_ deviceInventory = (*inventory.Memory)(nil)
+	_ deviceInventory = (*inventory.SQLite)(nil)
+)
 
 // Provider performs fleet discovery and retains the current device inventory.
 type Provider struct {
@@ -47,7 +53,12 @@ type Provider struct {
 
 // NewProvider returns a Provider configured with options.
 func NewProvider(options ...ProviderOption) (*Provider, error) {
-	opts := providerOptions{scannerConfig: internalscanner.DefaultConfig()}
+	opts := providerOptions{
+		scannerConfig: internalscanner.DefaultConfig(),
+		newInventory: func() (deviceInventory, error) {
+			return inventory.NewMemory(), nil
+		},
+	}
 	for _, option := range options {
 		if option == nil {
 			continue
@@ -59,9 +70,13 @@ func NewProvider(options ...ProviderOption) (*Provider, error) {
 	if opts.scannerConfig.AllowRoutedNetworks && len(opts.scannerConfig.AllowedNetworks) == 0 {
 		return nil, errors.New("routed network scans require at least one allowed network")
 	}
+	deviceStore, err := opts.newInventory()
+	if err != nil {
+		return nil, err
+	}
 	return &Provider{
 		scanner:   internalscanner.New(opts.scannerConfig),
-		inventory: inventory.New(),
+		inventory: deviceStore,
 	}, nil
 }
 
@@ -90,4 +105,12 @@ func (p *Provider) Scan(ctx context.Context, network string) (ScanResult, error)
 // List returns the current inventory sorted by IP address.
 func (p *Provider) List(ctx context.Context) ([]devices.Device, error) {
 	return p.inventory.List(ctx)
+}
+
+// Close releases resources held by the configured inventory.
+func (p *Provider) Close() error {
+	if p == nil || p.inventory == nil {
+		return nil
+	}
+	return p.inventory.Close()
 }

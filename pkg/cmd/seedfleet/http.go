@@ -95,6 +95,7 @@ type deviceCollection struct {
 }
 
 type deviceResponse struct {
+	ID           devices.ID `json:"id"`
 	IP           netip.Addr `json:"ip"`
 	MAC          string     `json:"mac,omitempty"`
 	Name         string     `json:"name,omitempty"`
@@ -111,6 +112,7 @@ func deviceCollectionFrom(network string, items []devices.Device) deviceCollecti
 	result := make([]deviceResponse, len(items))
 	for index, item := range items {
 		result[index] = deviceResponse{
+			ID:           item.ID,
 			IP:           item.IP,
 			MAC:          item.MAC,
 			Name:         item.Name,

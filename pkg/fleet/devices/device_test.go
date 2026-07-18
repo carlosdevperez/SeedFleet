@@ -11,11 +11,12 @@ func TestRefreshPreservesHistoricalIdentityAndUsesCurrentPorts(t *testing.T) {
 	first := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
 	later := first.Add(time.Minute)
 	address := netip.MustParseAddr("192.0.2.1")
+	id := ID("dev_test")
 	refreshed := Refresh(
-		Device{IP: address, MAC: "aa:bb:cc:dd:ee:ff", Name: "Router", Manufacturer: "Example", Hostname: "router.local", OpenPorts: []uint16{80}, OpenUDPPorts: []uint16{53}, DiscoveredBy: []string{"tcp", "udp"}, FirstSeen: first, LastSeen: first},
+		Device{ID: id, IP: address, MAC: "aa:bb:cc:dd:ee:ff", Name: "Router", Manufacturer: "Example", Hostname: "router.local", OpenPorts: []uint16{80}, OpenUDPPorts: []uint16{53}, DiscoveredBy: []string{"tcp", "udp"}, FirstSeen: first, LastSeen: first},
 		Device{IP: address, OpenPorts: []uint16{443}, OpenUDPPorts: []uint16{5353}, DiscoveredBy: []string{"neighbor"}, FirstSeen: later, LastSeen: later},
 	)
-	if refreshed.FirstSeen != first || refreshed.LastSeen != later || refreshed.Name != "Router" || refreshed.MAC == "" || refreshed.Manufacturer == "" || refreshed.Hostname == "" {
+	if refreshed.ID != id || refreshed.FirstSeen != first || refreshed.LastSeen != later || refreshed.Name != "Router" || refreshed.MAC == "" || refreshed.Manufacturer == "" || refreshed.Hostname == "" {
 		t.Fatalf("refreshed identity = %#v", refreshed)
 	}
 	if !reflect.DeepEqual(refreshed.OpenPorts, []uint16{443}) || !reflect.DeepEqual(refreshed.OpenUDPPorts, []uint16{5353}) || !reflect.DeepEqual(refreshed.DiscoveredBy, []string{"tcp", "udp", "neighbor"}) {

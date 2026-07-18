@@ -7,8 +7,12 @@ import (
 	"time"
 )
 
-// Device is the information learned about one address on the network.
+// ID identifies a device independently from its current network address.
+type ID string
+
+// Device is the information learned about one device on the network.
 type Device struct {
+	ID           ID
 	IP           netip.Addr
 	MAC          string
 	Name         string
@@ -32,6 +36,7 @@ func Refresh(existing, current Device) Device {
 	if !existing.IP.IsValid() {
 		return current
 	}
+	current.ID = existing.ID
 	if !existing.FirstSeen.IsZero() {
 		current.FirstSeen = existing.FirstSeen
 	}
@@ -58,6 +63,9 @@ func Refresh(existing, current Device) Device {
 func Combine(existing, found Device) Device {
 	if !existing.IP.IsValid() {
 		return found
+	}
+	if found.ID == "" {
+		found.ID = existing.ID
 	}
 	if found.MAC == "" {
 		found.MAC = existing.MAC
