@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/carlosdevperez/seedfleet/pkg/fleet/devices"
+	"github.com/carlosdevperez/seedfleet/pkg/fleet/internal/dockerinstaller"
 	internalscanner "github.com/carlosdevperez/seedfleet/pkg/fleet/internal/scanner"
 )
 
@@ -37,6 +38,33 @@ func (s *fakeScanner) Scan(ctx context.Context, _ string) (internalscanner.Resul
 type fakeInventory struct {
 	mu    sync.Mutex
 	items []devices.Device
+}
+
+type fakeDockerInstaller struct {
+	host    string
+	user    string
+	port    uint16
+	result  dockerinstaller.Result
+	err     error
+	started chan struct{}
+	release chan struct{}
+}
+
+func (i *fakeDockerInstaller) Install(ctx context.Context, host, user string, port uint16) (dockerinstaller.Result, error) {
+	i.host = host
+	i.user = user
+	i.port = port
+	if i.started != nil {
+		close(i.started)
+	}
+	if i.release != nil {
+		select {
+		case <-i.release:
+		case <-ctx.Done():
+			return dockerinstaller.Result{}, ctx.Err()
+		}
+	}
+	return i.result, i.err
 }
 
 func (i *fakeInventory) Save(_ context.Context, items []devices.Device) ([]devices.Device, error) {
@@ -164,5 +192,60 @@ func TestProviderWithSQLiteInventoryPersistsDevices(t *testing.T) {
 func TestProviderRejectsEmptySQLitePath(t *testing.T) {
 	if _, err := NewProvider(ProviderWithSQLiteInventory("")); err == nil {
 		t.Fatal("NewProvider accepted an empty SQLite path")
+	}
+}
+
+func TestProviderInstallsDocker(t *testing.T) {
+	installer := &fakeDockerInstaller{result: dockerinstaller.Result{
+		Status:  dockerinstaller.StatusInstalled,
+		Version: "Docker version 28.0.1",
+	}}
+	p := &Provider{dockerInstaller: installer}
+	target := DockerInstallTarget{Host: "node.local", User: "operator", Port: 2222}
+
+	result, err := p.InstallDocker(context.Background(), target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if installer.host != target.Host || installer.user != target.User || installer.port != target.Port {
+		t.Fatalf("installer target = %q %q %d", installer.host, installer.user, installer.port)
+	}
+	if result.Target != target || result.Status != DockerInstalled || result.Version != "Docker version 28.0.1" {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestProviderMapsInvalidDeploymentTarget(t *testing.T) {
+	p := &Provider{dockerInstaller: &fakeDockerInstaller{
+		err: &dockerinstaller.InvalidTargetError{Reason: "deployment host is required"},
+	}}
+	_, err := p.InstallDocker(context.Background(), DockerInstallTarget{})
+	var invalid *InvalidDeploymentTargetError
+	if !errors.As(err, &invalid) || invalid.Reason != "deployment host is required" {
+		t.Fatalf("error = %T %v", err, err)
+	}
+}
+
+func TestProviderAllowsOnlyOneDockerDeployment(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	p := &Provider{dockerInstaller: &fakeDockerInstaller{started: started, release: release}}
+	done := make(chan error, 1)
+	go func() {
+		_, err := p.InstallDocker(context.Background(), DockerInstallTarget{Host: "node-1"})
+		done <- err
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("deployment did not start")
+	}
+	if _, err := p.InstallDocker(context.Background(), DockerInstallTarget{Host: "node-2"}); !errors.Is(err, ErrDeploymentInProgress) {
+		t.Fatalf("second deployment error = %v", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }

@@ -17,10 +17,10 @@ cmd/seedfleet/app.Main
 pkg/cmd/seedfleet.Run ───── HTTP request/response handling
           │
           ▼
-pkg/fleet.Provider ──────── scan serialization and inventory orchestration
-       │             │
-       ▼             ▼
-internal/scanner  internal/inventory
+pkg/fleet.Provider ──────── fleet operation orchestration
+       │             │                 │
+       ▼             ▼                 ▼
+internal/scanner  internal/inventory  internal/dockerinstaller
        │             │
        └──────┬──────┘
               ▼
@@ -45,10 +45,12 @@ status codes and strict request decoding stay here.
 ### `pkg/fleet`
 
 `Provider` is the public API and the extension point for fleet management. It
-exposes two inventory operations and one lifecycle operation:
+exposes four operations:
 
-- `Scan`, which allows one active scan and stores successful observations; and
-- `List`, which returns the current inventory; and
+- `Scan`, which allows one active scan and stores successful observations;
+- `List`, which returns the current inventory;
+- `InstallDocker`, which allows one active deployment and synchronously
+  bootstraps Docker Engine on a Linux host over SSH; and
 - `Close`, which releases the configured inventory.
 
 Provider options configure aliases, network authorization, and optional SQLite
@@ -65,15 +67,17 @@ probe. Both collections represent the latest scan.
 
 ### `pkg/fleet/internal`
 
-The scanner plus the memory and SQLite inventories are private implementation
-packages. `Provider` owns a narrow inventory interface containing only `Save`,
-`List`, and `Close`, so tests and implementations can be swapped without
-exposing storage through the public API. The Go toolchain enforces this
-boundary, replacing the previous custom import-graph test.
+The scanner, memory and SQLite inventories, and Docker installer are private
+implementation packages. `Provider` owns a narrow inventory interface
+containing only `Save`, `List`, and `Close`, so tests and implementations can be
+swapped without exposing storage through the public API. The Go toolchain
+enforces this boundary, replacing the previous custom import-graph test.
 
 The scanner keeps protocol implementations isolated because packet parsing and
 platform-specific system access are independently debugged. Its local README
-maps the coordinator to each protocol file.
+maps the coordinator to each protocol file. The Docker installer is isolated
+from discovery and embeds the small POSIX shell program streamed through the
+user's local OpenSSH client.
 
 The scanner runs complete TCP and UDP port ranges concurrently for every usable
 address in the authorized CIDR while identity protocols gather complementary
@@ -94,6 +98,9 @@ design:
   persistence, and the server exposes that choice as `--database`.
 - Optional discovery sources are best effort. Their failures do not expand the
   public API into a diagnostics framework.
+- Docker deployment is synchronous and uses the official convenience installer
+  as an explicit early-stage tradeoff. Durable jobs, per-distribution package
+  plans, version pinning, and deployment history can follow concrete needs.
 - NetBIOS and gateway-page scraping are not part of discovery. New signals
   should provide enough value to justify their network traffic and maintenance
   cost.
