@@ -81,9 +81,10 @@ user's local OpenSSH client.
 
 The scanner runs complete TCP and UDP port ranges concurrently for every usable
 address in the authorized CIDR while identity protocols gather complementary
-observations. It reads neighbors after the sweep so Linux has a chance to
-populate its cache. `Provider` still owns scan serialization and commits only
-the completed observation batch to inventory.
+observations. A short TCP pass on common service ports primes the Linux neighbor
+cache, which is read as soon as that pass completes so a long full sweep cannot
+outlive early cache entries. `Provider` still owns scan serialization and
+commits only the completed observation batch to inventory.
 
 ## Deliberate simplifications
 

@@ -22,6 +22,10 @@ func TestDefaultConfigSweepsEveryTCPAndUDPPort(t *testing.T) {
 	if config.TCPPortRange.count() != 65535 || config.UDPPortRange.count() != 65535 {
 		t.Fatalf("port counts = TCP %d, UDP %d; want 65535 each", config.TCPPortRange.count(), config.UDPPortRange.count())
 	}
+	wantDiscovery := []uint16{22, 80, 443, 445, 3389}
+	if !reflect.DeepEqual(config.DiscoveryPorts, wantDiscovery) {
+		t.Fatalf("discovery ports = %v, want %v", config.DiscoveryPorts, wantDiscovery)
+	}
 }
 
 func TestPortJobQueueIncludesAddressesAndRangeEndpoints(t *testing.T) {

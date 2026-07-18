@@ -16,6 +16,7 @@ import (
 type Config struct {
 	TCPPortRange        PortRange
 	UDPPortRange        PortRange
+	DiscoveryPorts      []uint16
 	Timeout             time.Duration
 	PortTimeout         time.Duration
 	Concurrency         int
@@ -42,6 +43,7 @@ func DefaultConfig() Config {
 	return Config{
 		TCPPortRange:     allPorts,
 		UDPPortRange:     allPorts,
+		DiscoveryPorts:   []uint16{22, 80, 443, 445, 3389},
 		Timeout:          300 * time.Millisecond,
 		PortTimeout:      100 * time.Millisecond,
 		Concurrency:      64,
@@ -62,6 +64,7 @@ type Scanner struct {
 // New returns a scanner configured with the supplied discovery sources.
 func New(config Config) *Scanner {
 	config.Aliases = normalizeAliases(config.Aliases)
+	config.DiscoveryPorts = append([]uint16(nil), config.DiscoveryPorts...)
 	config.AllowedNetworks = append([]netip.Prefix(nil), config.AllowedNetworks...)
 	for index := range config.AllowedNetworks {
 		if config.AllowedNetworks[index].IsValid() {
@@ -112,6 +115,14 @@ func (s *Scanner) validateConfig() error {
 	if err := s.config.UDPPortRange.validate("UDP"); err != nil {
 		return err
 	}
+	for _, port := range s.config.DiscoveryPorts {
+		if port == 0 {
+			return errors.New("TCP discovery ports must be between 1 and 65535")
+		}
+	}
+	if len(s.config.DiscoveryPorts) > 0 && s.config.Timeout <= 0 {
+		return errors.New("TCP discovery timeout must be greater than zero")
+	}
 	if (s.config.TCPPortRange.enabled() || s.config.UDPPortRange.enabled()) && s.config.PortTimeout <= 0 {
 		return errors.New("port probe timeout must be greater than zero")
 	}
@@ -128,15 +139,21 @@ func (s *Scanner) Scan(ctx context.Context, network string) (Result, error) {
 
 	identityResults := s.startIdentitySources(ctx, prefix)
 	addresses := usableAddresses(prefix, count)
-	ports := <-s.startPortScan(ctx, addresses)
-	if ports.err != nil {
-		return Result{}, ports.err
+	portResults := s.startPortScan(ctx, addresses)
+	discovery, err := s.scanTCPDiscovery(ctx, addresses)
+	if err != nil {
+		return Result{}, err
 	}
 	foundByIP := make(map[netip.Addr]devices.Device)
-	applyPortScan(foundByIP, ports)
+	applyPortScan(foundByIP, portScan{tcp: discovery, tcpScanned: len(s.config.DiscoveryPorts) > 0})
 	if err := s.scanNeighbors(ctx, prefix, count, foundByIP); err != nil {
 		return Result{}, err
 	}
+	ports := <-portResults
+	if ports.err != nil {
+		return Result{}, ports.err
+	}
+	applyPortScan(foundByIP, ports)
 	if s.config.ResolveNames {
 		applyIdentities(foundByIP, prefix, count, collectIdentities(identityResults, len(s.identities)))
 		if err := s.resolveHostnames(ctx, foundByIP); err != nil {

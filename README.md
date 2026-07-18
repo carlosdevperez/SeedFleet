@@ -130,6 +130,7 @@ API on its default loopback address while using this endpoint.
 
 SeedFleet combines a complete port sweep with complementary discovery signals:
 
+- a fast TCP reachability pass on ports 22, 80, 443, 445, and 3389;
 - TCP connect probes on ports 1 through 65,535 for every usable address;
 - UDP datagram probes on ports 1 through 65,535 for every usable address;
 - the Linux IPv4 neighbor table when available;
@@ -140,14 +141,16 @@ SeedFleet combines a complete port sweep with complementary discovery signals:
 - optional MAC-address aliases.
 
 Successful TCP connections and explicit connection refusals both prove that a
-host is reachable. On Linux, the port attempts populate the neighbor cache and
-the scanner then reads complete entries from `/proc/net/arp`. This also finds
-quiet devices that drop every port probe.
+host is reachable. The fast pass runs while the complete sweep is in progress;
+on Linux, the scanner reads `/proc/net/arp` immediately after that pass, before
+early cache entries can expire during a long sweep. This also finds quiet
+devices that drop every configured TCP probe.
 
-TCP and UDP use separate bounded worker pools and run concurrently. Workers
-atomically claim jobs from the address/port range instead of serializing behind
-a single producer, and only positive observations are retained. The complete
-target matrix is therefore covered without allocating it in memory.
+The fast pass and the complete TCP and UDP sweeps use separate bounded worker
+pools and run concurrently. Full-sweep workers atomically claim jobs from the
+address/port range instead of serializing behind a single producer, and only
+positive observations are retained. The complete target matrix is therefore
+covered without allocating it in memory.
 
 A successful TCP connection is reported as open. UDP has no generic handshake,
 so SeedFleet sends an empty datagram to each UDP port and reports a port as open

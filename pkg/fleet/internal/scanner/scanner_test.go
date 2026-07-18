@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 )
@@ -61,6 +62,93 @@ func TestScanIncludesQuietHostFromNeighborTable(t *testing.T) {
 	if !reflect.DeepEqual(found[0].DiscoveredBy, []string{"neighbor"}) {
 		t.Fatalf("DiscoveredBy = %v, want [neighbor]", found[0].DiscoveredBy)
 	}
+}
+
+func TestScanReadsNeighborsBeforeFullPortSweepCompletes(t *testing.T) {
+	fullSweepStarted := make(chan struct{})
+	neighborRead := make(chan struct{}, 1)
+	releaseFullSweep := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseFullSweep) }) }
+	defer release()
+
+	address := netip.MustParseAddr("192.0.2.1")
+	scanner := New(Config{
+		TCPPortRange:      PortRange{First: 1, Last: 1},
+		DiscoveryPorts:    []uint16{80},
+		Timeout:           time.Second,
+		PortTimeout:       time.Second,
+		Concurrency:       1,
+		ProbeConcurrency:  1,
+		MaxAddresses:      1,
+		InterfacePrefixes: testInterfacePrefixes,
+		NeighborSource: signalingNeighborSource{
+			called:    neighborRead,
+			neighbors: []Neighbor{{IP: address, MAC: mustParseMAC(t, "e0:ef:bf:ad:56:3c")}},
+		},
+		IdentitySources: []IdentitySource{},
+		DialContext: func(ctx context.Context, _, endpoint string) (net.Conn, error) {
+			if endpoint != "192.0.2.1:1" {
+				return nil, errors.New("probe timed out")
+			}
+			close(fullSweepStarted)
+			select {
+			case <-releaseFullSweep:
+				return nil, errors.New("probe timed out")
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		},
+	})
+
+	type scanResult struct {
+		result Result
+		err    error
+	}
+	completed := make(chan scanResult, 1)
+	go func() {
+		result, err := scanner.Scan(context.Background(), "192.0.2.1/32")
+		completed <- scanResult{result: result, err: err}
+	}()
+
+	select {
+	case <-fullSweepStarted:
+	case <-time.After(time.Second):
+		t.Fatal("full port sweep did not start")
+	}
+	select {
+	case <-neighborRead:
+	case <-time.After(time.Second):
+		t.Fatal("neighbor table was not read while full port sweep was active")
+	}
+	select {
+	case result := <-completed:
+		t.Fatalf("scan completed before the full sweep was released: %v", result.err)
+	default:
+	}
+
+	release()
+	select {
+	case result := <-completed:
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		if len(result.result.Devices) != 1 || result.result.Devices[0].IP != address {
+			t.Fatalf("devices = %#v, want neighbor %s", result.result.Devices, address)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("scan did not complete after the full sweep was released")
+	}
+}
+
+type signalingNeighborSource struct {
+	called    chan<- struct{}
+	neighbors []Neighbor
+}
+
+func (source signalingNeighborSource) List(context.Context) ([]Neighbor, error) {
+	source.called <- struct{}{}
+	return source.neighbors, nil
 }
 
 func TestScanIncludesHostFromNameDiscovery(t *testing.T) {

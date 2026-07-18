@@ -24,6 +24,81 @@ type probeResult struct {
 	reachable bool
 }
 
+// scanTCPDiscovery performs a short pass over a small set of TCP ports. Its
+// primary purpose is to prime the operating-system neighbor cache before the
+// complete port sweep can outlive those cache entries.
+func (s *Scanner) scanTCPDiscovery(ctx context.Context, addresses []netip.Addr) (protocolPortScan, error) {
+	discovery := protocolPortScan{
+		open:      make(map[netip.Addr][]uint16, len(addresses)),
+		reachable: make(map[netip.Addr]struct{}, len(addresses)),
+	}
+	if len(addresses) == 0 || len(s.config.DiscoveryPorts) == 0 {
+		return discovery, nil
+	}
+
+	workerCount := s.config.ProbeConcurrency
+	if workerCount < 1 {
+		workerCount = s.config.Concurrency * len(s.config.DiscoveryPorts)
+	}
+	jobCount := len(addresses) * len(s.config.DiscoveryPorts)
+	if workerCount > jobCount {
+		workerCount = jobCount
+	}
+
+	jobs := make(chan probeJob)
+	results := make(chan probeResult, workerCount)
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer workers.Done()
+			for job := range jobs {
+				open, reachable := s.probePort(ctx, job.address, job.port, s.config.Timeout)
+				if !reachable {
+					continue
+				}
+				select {
+				case results <- probeResult{address: job.address, port: job.port, open: open, reachable: true}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+	go func() {
+		defer close(jobs)
+		for _, address := range addresses {
+			for _, port := range s.config.DiscoveryPorts {
+				select {
+				case jobs <- probeJob{address: address, port: port}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+	go func() {
+		workers.Wait()
+		close(results)
+	}()
+
+	for result := range results {
+		discovery.reachable[result.address] = struct{}{}
+		if result.open {
+			discovery.open[result.address] = append(discovery.open[result.address], result.port)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return protocolPortScan{}, err
+	}
+	for address := range discovery.open {
+		sort.Slice(discovery.open[address], func(i, j int) bool {
+			return discovery.open[address][i] < discovery.open[address][j]
+		})
+	}
+	return discovery, nil
+}
+
 func (s *Scanner) scanTCPPorts(ctx context.Context, addresses []netip.Addr) (protocolPortScan, error) {
 	portScan := protocolPortScan{
 		open:      make(map[netip.Addr][]uint16, len(addresses)),
