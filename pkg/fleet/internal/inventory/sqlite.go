@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS devices (
 	manufacturer TEXT NOT NULL,
 	hostname TEXT NOT NULL,
 	open_ports TEXT NOT NULL,
-	open_udp_ports TEXT NOT NULL,
+	open_udp_ports TEXT NOT NULL DEFAULT '[]',
 	discovered_by TEXT NOT NULL,
 	first_seen TEXT NOT NULL,
 	last_seen TEXT NOT NULL
@@ -60,7 +60,48 @@ func NewSQLite(path string) (*SQLite, error) {
 		db.Close()
 		return nil, fmt.Errorf("initialize SQLite inventory: %w", err)
 	}
+	if err := ensureSQLiteUDPPortsColumn(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate SQLite inventory: %w", err)
+	}
 	return &SQLite{db: db}, nil
+}
+
+func ensureSQLiteUDPPortsColumn(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(devices)`)
+	if err != nil {
+		return err
+	}
+	found := false
+	for rows.Next() {
+		var (
+			position     int
+			name         string
+			columnType   string
+			notNull      int
+			defaultValue any
+			primaryKey   int
+		)
+		if err := rows.Scan(&position, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "open_udp_ports" {
+			found = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if found {
+		return nil
+	}
+	_, err = db.Exec(`ALTER TABLE devices ADD COLUMN open_udp_ports TEXT NOT NULL DEFAULT '[]'`)
+	return err
 }
 
 // Save commits a scan result in one transaction and returns devices in input

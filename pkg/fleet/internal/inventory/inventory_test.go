@@ -2,6 +2,7 @@ package inventory
 
 import (
 	"context"
+	"database/sql"
 	"net/netip"
 	"path/filepath"
 	"testing"
@@ -271,5 +272,56 @@ func TestSQLiteInventoryPersistsAcrossReopen(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].ID != created[0].ID || items[0].Name != "printer" || items[0].FirstSeen != first || len(items[0].OpenUDPPorts) != 1 || items[0].OpenUDPPorts[0] != 161 {
 		t.Fatalf("reopened inventory = %#v", items)
+	}
+}
+
+func TestSQLiteInventoryMigratesUDPPortStorage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	database, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = database.Exec(`
+		CREATE TABLE devices (
+			id TEXT PRIMARY KEY,
+			ip TEXT NOT NULL UNIQUE,
+			mac TEXT NOT NULL,
+			mac_key TEXT NOT NULL,
+			name TEXT NOT NULL,
+			manufacturer TEXT NOT NULL,
+			hostname TEXT NOT NULL,
+			open_ports TEXT NOT NULL,
+			discovered_by TEXT NOT NULL,
+			first_seen TEXT NOT NULL,
+			last_seen TEXT NOT NULL
+		);
+		INSERT INTO devices VALUES (
+			'dev_legacy', '192.0.2.10', '', '', 'legacy', '', '',
+			'[80]', '["tcp"]', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+		);
+	`)
+	if err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	inventory, err := NewSQLite(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := inventory.Close(); err != nil {
+			t.Errorf("close inventory: %v", err)
+		}
+	})
+	items, err := inventory.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].ID != "dev_legacy" || len(items[0].OpenPorts) != 1 || items[0].OpenPorts[0] != 80 || len(items[0].OpenUDPPorts) != 0 {
+		t.Fatalf("migrated inventory = %#v", items)
 	}
 }
