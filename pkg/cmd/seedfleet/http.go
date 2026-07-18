@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"mime"
 	"net/http"
 	"net/netip"
@@ -16,9 +17,12 @@ import (
 
 const maximumRequestBody = 1 << 20
 
+const dockerDeploymentTimeout = 10 * time.Minute
+
 type provider interface {
 	Scan(context.Context, string) (fleet.ScanResult, error)
 	List(context.Context) ([]devices.Device, error)
+	InstallDocker(context.Context, fleet.DockerInstallTarget) (fleet.DockerInstallResult, error)
 }
 
 type api struct {
@@ -31,7 +35,50 @@ func newHandler(provider provider) http.Handler {
 	mux.HandleFunc("GET /health", api.health)
 	mux.HandleFunc("GET /devices", api.listDevices)
 	mux.HandleFunc("POST /scans", api.scan)
+	mux.HandleFunc("POST /deployments/docker", api.installDocker)
 	return mux
+}
+
+func (a *api) installDocker(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if err := requireJSON(r); err != nil {
+		writeJSON(w, err.Status, errorResponse{Message: err.Message})
+		return
+	}
+	var request dockerInstallRequest
+	if err := decodeJSON(w, r, &request); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Message: "body must be JSON containing a Docker deployment target"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), dockerDeploymentTimeout)
+	defer cancel()
+	result, err := a.provider.InstallDocker(ctx, fleet.DockerInstallTarget{
+		Host: request.Host,
+		User: request.User,
+		Port: request.Port,
+	})
+	if err != nil {
+		if errors.Is(err, fleet.ErrDeploymentInProgress) {
+			writeJSON(w, http.StatusConflict, errorResponse{Message: err.Error()})
+			return
+		}
+		var invalid *fleet.InvalidDeploymentTargetError
+		if errors.As(err, &invalid) {
+			writeJSON(w, http.StatusBadRequest, errorResponse{Message: invalid.Error()})
+			return
+		}
+		log.Printf("Docker installation on %q failed: %v", request.Host, err)
+		writeJSON(w, http.StatusBadGateway, errorResponse{Message: "Docker installation failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, dockerInstallResponse{
+		Host:    result.Target.Host,
+		User:    result.Target.User,
+		Port:    result.Target.Port,
+		Status:  result.Status,
+		Version: result.Version,
+	})
 }
 
 func (a *api) health(w http.ResponseWriter, _ *http.Request) {
@@ -78,6 +125,20 @@ func (a *api) scan(w http.ResponseWriter, r *http.Request) {
 
 type scanRequest struct {
 	Network string `json:"network"`
+}
+
+type dockerInstallRequest struct {
+	Host string `json:"host"`
+	User string `json:"user,omitempty"`
+	Port uint16 `json:"port,omitempty"`
+}
+
+type dockerInstallResponse struct {
+	Host    string                    `json:"host"`
+	User    string                    `json:"user,omitempty"`
+	Port    uint16                    `json:"port,omitempty"`
+	Status  fleet.DockerInstallStatus `json:"status"`
+	Version string                    `json:"version"`
 }
 
 type healthResponse struct {

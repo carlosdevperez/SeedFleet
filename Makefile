@@ -28,5 +28,6 @@ race:
 
 verify:
 	test -z "$$(gofmt -s -l .)"
+	sh -n pkg/fleet/internal/dockerinstaller/install.sh
 	go vet ./...
 	go test ./...

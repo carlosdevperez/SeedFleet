@@ -45,7 +45,7 @@ func Run(ctx context.Context, args []string) error {
 		Handler:           newHandler(provider),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      2 * time.Minute,
+		WriteTimeout:      dockerDeploymentTimeout + 5*time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
 	serverContext, cancel := context.WithCancel(ctx)

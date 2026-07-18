@@ -17,10 +17,10 @@ cmd/seedfleet/app.Main
 pkg/cmd/seedfleet.Run ───── HTTP request/response handling
           │
           ▼
-pkg/fleet.Provider ──────── scan serialization and inventory orchestration
-       │             │
-       ▼             ▼
-internal/scanner  internal/inventory
+pkg/fleet.Provider ──────── fleet operation orchestration
+       │             │                 │
+       ▼             ▼                 ▼
+internal/scanner  internal/inventory  internal/dockerinstaller
        │             │
        └──────┬──────┘
               ▼
@@ -45,10 +45,12 @@ status codes and strict request decoding stay here.
 ### `pkg/fleet`
 
 `Provider` is the public API and the extension point for fleet management. It
-currently exposes two operations:
+currently exposes three operations:
 
 - `Scan`, which allows one active scan and stores successful observations; and
-- `List`, which returns the current inventory.
+- `List`, which returns the current inventory; and
+- `InstallDocker`, which allows one active deployment and synchronously
+  bootstraps Docker Engine on a Linux host over SSH.
 
 Provider options configure aliases and network authorization without exposing
 scanner implementation types.
@@ -60,13 +62,15 @@ observations and refreshing historical inventory identity.
 
 ### `pkg/fleet/internal`
 
-The scanner and memory inventory are private implementation packages. The Go
-toolchain enforces this boundary, replacing the previous custom import-graph
-test.
+The scanner, memory inventory, and Docker installer are private implementation
+packages. The Go toolchain enforces this boundary, replacing the previous
+custom import-graph test.
 
 The scanner keeps protocol implementations isolated because packet parsing and
 platform-specific system access are independently debugged. Its local README
-maps the coordinator to each protocol file.
+maps the coordinator to each protocol file. The Docker installer is isolated
+from discovery and embeds the small POSIX shell program streamed through the
+user's local OpenSSH client.
 
 ## Deliberate simplifications
 
@@ -81,6 +85,9 @@ design:
   abstraction while only one implementation exists.
 - Optional discovery sources are best effort. Their failures do not expand the
   public API into a diagnostics framework.
+- Docker deployment is synchronous and uses the official convenience installer
+  as an explicit early-stage tradeoff. Durable jobs, per-distribution package
+  plans, version pinning, and deployment history can follow concrete needs.
 - NetBIOS and gateway-page scraping are not part of discovery. New signals
   should provide enough value to justify their network traffic and maintenance
   cost.

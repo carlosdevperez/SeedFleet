@@ -15,7 +15,9 @@ import (
 
 type fakeProvider struct {
 	network string
+	target  fleet.DockerInstallTarget
 	items   []devices.Device
+	install fleet.DockerInstallResult
 	err     error
 }
 
@@ -26,6 +28,11 @@ func (p *fakeProvider) Scan(_ context.Context, network string) (fleet.ScanResult
 
 func (p *fakeProvider) List(context.Context) ([]devices.Device, error) {
 	return p.items, p.err
+}
+
+func (p *fakeProvider) InstallDocker(_ context.Context, target fleet.DockerInstallTarget) (fleet.DockerInstallResult, error) {
+	p.target = target
+	return p.install, p.err
 }
 
 func TestScanEndpoint(t *testing.T) {
@@ -64,6 +71,60 @@ func TestListDevicesEndpoint(t *testing.T) {
 
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"name":"printer"`) {
 		t.Fatalf("status = %d; body: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestDockerDeploymentEndpoint(t *testing.T) {
+	target := fleet.DockerInstallTarget{Host: "node.local", User: "operator", Port: 2222}
+	provider := &fakeProvider{install: fleet.DockerInstallResult{
+		Target:  target,
+		Status:  fleet.DockerInstalled,
+		Version: "Docker version 28.0.1",
+	}}
+	handler := newHandler(provider)
+	request := httptest.NewRequest(http.MethodPost, "/deployments/docker", strings.NewReader(`{"host":"node.local","user":"operator","port":2222}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", response.Code, http.StatusOK, response.Body.String())
+	}
+	if provider.target != target {
+		t.Fatalf("target = %#v", provider.target)
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, `"status":"installed"`) || !strings.Contains(body, `"version":"Docker version 28.0.1"`) {
+		t.Fatalf("body = %s", body)
+	}
+}
+
+func TestDockerDeploymentEndpointErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		body       string
+		mediaType  string
+		wantStatus int
+	}{
+		{name: "deployment running", err: fleet.ErrDeploymentInProgress, body: `{"host":"node"}`, mediaType: "application/json", wantStatus: http.StatusConflict},
+		{name: "invalid target", err: &fleet.InvalidDeploymentTargetError{Reason: "host required"}, body: `{"host":""}`, mediaType: "application/json", wantStatus: http.StatusBadRequest},
+		{name: "SSH failure", err: errors.New("private SSH failure"), body: `{"host":"node"}`, mediaType: "application/json", wantStatus: http.StatusBadGateway},
+		{name: "unknown field", body: `{"host":"node","password":"secret"}`, mediaType: "application/json", wantStatus: http.StatusBadRequest},
+		{name: "wrong media type", body: `{"host":"node"}`, mediaType: "text/plain", wantStatus: http.StatusUnsupportedMediaType},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			handler := newHandler(&fakeProvider{err: test.err})
+			request := httptest.NewRequest(http.MethodPost, "/deployments/docker", strings.NewReader(test.body))
+			request.Header.Set("Content-Type", test.mediaType)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d; body: %s", response.Code, test.wantStatus, response.Body.String())
+			}
+		})
 	}
 }
 
